@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/cespare/xxhash/v2"
@@ -11,7 +12,6 @@ import (
 
 const BufferSize = 4 * 1024 * 1024 // 4MB
 
-// ProgressInfo contains the current status of the copy operation
 type ProgressInfo struct {
 	TotalBytes  int64
 	CopiedBytes int64
@@ -19,14 +19,14 @@ type ProgressInfo struct {
 	Speed       float64 // bytes per second
 }
 
-// Offloader handles the file copy and verification process
 type Offloader struct {
 	Source      string
 	Destination string
 	BufferSize  int
+	SourceHash  string
+	DestHash    string
 }
 
-// NewOffloader creates a new Offloader instance
 func NewOffloader(src, dst string) *Offloader {
 	return &Offloader{
 		Source:      src,
@@ -35,66 +35,203 @@ func NewOffloader(src, dst string) *Offloader {
 	}
 }
 
-// Copy performs the copy operation and reports progress via the provided channel
-// It returns an error if the copy fails
+// tracker maintains state across multiple files
+type tracker struct {
+	TotalBytes   int64
+	CopiedBytes  int64
+	StartTime    time.Time
+	LastUpdate   time.Time
+	ProgressChan chan<- ProgressInfo
+}
+
+func (t *tracker) update(n int, file string) {
+	t.CopiedBytes += int64(n)
+	now := time.Now()
+	if now.Sub(t.LastUpdate) > 50*time.Millisecond || t.CopiedBytes == t.TotalBytes {
+		elapsed := now.Sub(t.StartTime).Seconds()
+		var speed float64
+		if elapsed > 0 {
+			speed = float64(t.CopiedBytes) / elapsed
+		}
+
+		// Non-blocking send to avoid stalling copy
+		select {
+		case t.ProgressChan <- ProgressInfo{
+			TotalBytes:  t.TotalBytes,
+			CopiedBytes: t.CopiedBytes,
+			CurrentFile: file,
+			Speed:       speed,
+		}:
+			t.LastUpdate = now
+		default:
+			// Skip update if channel full
+		}
+	}
+}
+
 func (o *Offloader) Copy(progressChan chan<- ProgressInfo) error {
-	sourceFile, err := os.Open(o.Source)
-	if err != nil {
-		return fmt.Errorf("failed to open source: %w", err)
-	}
-	defer sourceFile.Close()
-
-	destFile, err := os.Create(o.Destination)
-	if err != nil {
-		return fmt.Errorf("failed to create destination: %w", err)
-	}
-	defer destFile.Close()
-
-	fileInfo, err := sourceFile.Stat()
+	info, err := os.Stat(o.Source)
 	if err != nil {
 		return fmt.Errorf("failed to stat source: %w", err)
 	}
-	totalSize := fileInfo.Size()
 
-	// Create a proxy reader to track progress
-	reader := &progressReader{
-		Reader:       sourceFile,
-		Total:        totalSize,
-		ProgressChan: progressChan,
+	t := &tracker{
 		StartTime:    time.Now(),
 		LastUpdate:   time.Now(),
+		ProgressChan: progressChan,
 	}
+
+	if info.IsDir() {
+		// Calculate total size
+		err := filepath.Walk(o.Source, func(path string, info os.FileInfo, err error) error {
+			if err != nil {
+				return err
+			}
+			if !info.IsDir() {
+				t.TotalBytes += info.Size()
+			}
+			return nil
+		})
+		if err != nil {
+			return fmt.Errorf("failed to calculate total size: %w", err)
+		}
+
+		// Walk and copy
+		return filepath.Walk(o.Source, func(path string, info os.FileInfo, err error) error {
+			if err != nil {
+				return err
+			}
+
+			relPath, err := filepath.Rel(o.Source, path)
+			if err != nil {
+				return err
+			}
+			destPath := filepath.Join(o.Destination, relPath)
+
+			if info.IsDir() {
+				return os.MkdirAll(destPath, info.Mode())
+			}
+
+			return o.copyFile(path, destPath, t)
+		})
+	} else {
+		// Single file
+		t.TotalBytes = info.Size()
+		// Ensure destination directory exists (if user gave a path including filename)
+		// But usually Destination IS the file path.
+		// If Source is /a/b.txt and Dest is /Volumes/X/b.txt.
+		// Construct parent dir.
+		destDir := filepath.Dir(o.Destination)
+		if err := os.MkdirAll(destDir, 0755); err != nil {
+			return fmt.Errorf("failed to create destination directory: %w", err)
+		}
+
+		return o.copyFile(o.Source, o.Destination, t)
+	}
+}
+
+func (o *Offloader) copyFile(src, dst string, t *tracker) error {
+	sourceFile, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer sourceFile.Close()
+
+	destFile, err := os.Create(dst)
+	if err != nil {
+		return err
+	}
+	defer destFile.Close()
 
 	buf := make([]byte, o.BufferSize)
-	_, err = io.CopyBuffer(destFile, reader, buf)
-	if err != nil {
-		return fmt.Errorf("error during copy: %w", err)
+
+	// Custom loop to update tracker
+	for {
+		n, err := sourceFile.Read(buf)
+		if n > 0 {
+			if _, wErr := destFile.Write(buf[:n]); wErr != nil {
+				return wErr
+			}
+			t.update(n, filepath.Base(src))
+		}
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return err
+		}
 	}
 
-	// Ensure all data is written to disk
-	if err := destFile.Sync(); err != nil {
-		return fmt.Errorf("failed to sync destination: %w", err)
-	}
-
-	return nil
+	return destFile.Sync()
 }
 
-// Verify performs a xxHash verification of the source and destination files
 func (o *Offloader) Verify() (bool, error) {
-	srcHash, err := calculateXXHash(o.Source)
+	info, err := os.Stat(o.Source)
 	if err != nil {
-		return false, fmt.Errorf("failed to hash source: %w", err)
+		return false, err
 	}
 
-	dstHash, err := calculateXXHash(o.Destination)
-	if err != nil {
-		return false, fmt.Errorf("failed to hash destination: %w", err)
-	}
+	if info.IsDir() {
+		// Recursive verification
+		// Simple approach: Walk and hash everything, combine hashes.
+		// We can use a Merkle-like approach or just sum of hashes.
+		// Combining xxHashes via XOR or addition is acceptable for simple integrity check.
 
-	return srcHash == dstHash, nil
+		var srcCombinedHash uint64
+		var dstCombinedHash uint64
+
+		err = filepath.Walk(o.Source, func(path string, info os.FileInfo, err error) error {
+			if err != nil {
+				return err
+			}
+			if !info.IsDir() {
+				h, err := calculateXXHash(path)
+				if err != nil {
+					return err
+				}
+				srcCombinedHash ^= h // XOR for combination
+
+				// Verify counterpart immediately?
+				relPath, _ := filepath.Rel(o.Source, path)
+				dstPath := filepath.Join(o.Destination, relPath)
+
+				dstH, err := calculateXXHash(dstPath)
+				if err != nil {
+					return err
+				}
+				dstCombinedHash ^= dstH
+
+				if h != dstH { // Fail fast
+					return fmt.Errorf("hash mismatch at %s", relPath)
+				}
+			}
+			return nil
+		})
+
+		o.SourceHash = fmt.Sprintf("DIR-%x", srcCombinedHash)
+		o.DestHash = fmt.Sprintf("DIR-%x", dstCombinedHash)
+
+		if err != nil {
+			return false, err
+		}
+		return srcCombinedHash == dstCombinedHash, nil
+	} else {
+		srcHashInt, err := calculateXXHash(o.Source)
+		if err != nil {
+			return false, err
+		}
+		o.SourceHash = fmt.Sprintf("%x", srcHashInt)
+
+		dstHashInt, err := calculateXXHash(o.Destination)
+		if err != nil {
+			return false, err
+		}
+		o.DestHash = fmt.Sprintf("%x", dstHashInt)
+
+		return srcHashInt == dstHashInt, nil
+	}
 }
 
-// calculateXXHash calculates the xxHash of a file
 func calculateXXHash(path string) (uint64, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -107,40 +244,5 @@ func calculateXXHash(path string) (uint64, error) {
 	if _, err := io.CopyBuffer(hasher, f, buf); err != nil {
 		return 0, err
 	}
-
 	return hasher.Sum64(), nil
-}
-
-// progressReader wraps io.Reader to track progress
-type progressReader struct {
-	io.Reader
-	Total        int64
-	Copied       int64
-	ProgressChan chan<- ProgressInfo
-	StartTime    time.Time
-	LastUpdate   time.Time
-}
-
-func (pr *progressReader) Read(p []byte) (int, error) {
-	n, err := pr.Reader.Read(p)
-	if n > 0 {
-		pr.Copied += int64(n)
-
-		// Update progress periodically or on completion to avoid flooding the channel
-		// However, for smooth UI, we want frequent updates. Bubbletea can handle it.
-		// Let's limit updates to every 50ms to be safe if buffer is small,
-		// but with 4MB buffer, sends will be infrequent enough naturally (4MB at 1GB/s is 4ms, ok maybe too fast).
-		// Actually 4MB chunks are quite large.
-
-		now := time.Now()
-		elapsed := now.Sub(pr.StartTime).Seconds()
-		speed := float64(pr.Copied) / elapsed
-
-		pr.ProgressChan <- ProgressInfo{
-			TotalBytes:  pr.Total,
-			CopiedBytes: pr.Copied,
-			Speed:       speed,
-		}
-	}
-	return n, err
 }
