@@ -29,7 +29,10 @@ func GeneratePDF(path string, o *offload.Offloader, startTime, endTime time.Time
 	pdf.SetFont("Arial", "", 12)
 	pdf.Cell(40, 8, fmt.Sprintf("Source:      %s", o.Source))
 	pdf.Ln(6)
-	pdf.Cell(40, 8, fmt.Sprintf("Destination: %s", o.Destination))
+	for i, dst := range o.Destinations {
+		pdf.Cell(40, 8, fmt.Sprintf("Dest %d:      %s", i+1, dst))
+		pdf.Ln(6)
+	}
 	pdf.Ln(6)
 	pdf.Cell(40, 8, fmt.Sprintf("Files:       %d", len(o.Files)))
 	pdf.Ln(6)

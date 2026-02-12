@@ -4,14 +4,15 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"time"
 
-	"github.com/charmbracelet/bubbles/filepicker"
 	"github.com/charmbracelet/bubbles/list"
 	"github.com/charmbracelet/bubbles/progress"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
+	"loot/internal/mhl"
 	"loot/internal/offload"
 	"loot/internal/report"
 )
@@ -65,27 +66,32 @@ type state int
 const (
 	stateSelectingSource state = iota
 	stateSelectingDest
+	stateConfirmAddDest
 	stateCopying
 	stateVerifying
 	stateDone
 )
 
-// volItem implements list.Item
-type volItem struct {
+// ... Styles ... (kept same)
+
+// fileItem implements list.Item
+type fileItem struct {
 	title, desc, path string
+	isDir             bool
 }
 
-func (i volItem) Title() string       { return i.title }
-func (i volItem) Description() string { return i.desc }
-func (i volItem) FilterValue() string { return i.title }
+func (i fileItem) Title() string       { return i.title }
+func (i fileItem) Description() string { return i.desc }
+func (i fileItem) FilterValue() string { return i.title }
 
 type Model struct {
-	state      state
-	filepicker filepicker.Model
-	volList    list.Model
+	state   state
+	srcList list.Model
+	dstList list.Model
 
-	srcPath string
-	dstPath string
+	currentPath string // Current browsing path
+	srcPath     string
+	dstPaths    []string // Multiple destinations
 
 	progress  progress.Model
 	offloader *offload.Offloader
@@ -101,18 +107,25 @@ type Model struct {
 
 	startTime time.Time
 	endTime   time.Time
+
+	width  int
+	height int
 }
 
 func InitialModel(src, dst string) Model {
-	fp := filepicker.New()
-	fp.AllowedTypes = []string{} // All files
-	fp.CurrentDirectory, _ = os.Getwd()
-	fp.ShowHidden = true
+	// Default size, will be updated by WindowSizeMsg, but prevents empty render
+	defaultWidth := 80
+	defaultHeight := 14
 
-	// Initialize empty list, we'll populate it when needed or now
-	l := list.New([]list.Item{}, list.NewDefaultDelegate(), 0, 0)
-	l.Title = "Select Destination Volume"
-	l.SetShowHelp(false)
+	// Source List
+	srcList := list.New([]list.Item{}, list.NewDefaultDelegate(), defaultWidth, defaultHeight)
+	srcList.Title = "Select Source"
+	srcList.SetShowHelp(false)
+
+	// Dest List
+	dstList := list.New([]list.Item{}, list.NewDefaultDelegate(), defaultWidth, defaultHeight)
+	dstList.Title = "Select Destination"
+	dstList.SetShowHelp(false)
 
 	initialState := stateSelectingSource
 	if src != "" && dst != "" {
@@ -126,26 +139,96 @@ func InitialModel(src, dst string) Model {
 	)
 
 	return Model{
-		state:      initialState,
-		filepicker: fp,
-		volList:    l,
-		srcPath:    src,
-		dstPath:    dst,
-		progress:   p,
-		offloader:  offload.NewOffloader(src, dst),
-		status:     "Initializing...",
+		state:     initialState,
+		srcList:   srcList,
+		dstList:   dstList,
+		srcPath:   src,
+		dstPaths:  []string{}, // Empty initially
+		progress:  p,
+		offloader: offload.NewOffloader(src, dst),
+		status:    "Initializing...",
+		width:     defaultWidth,
+		height:    defaultHeight,
 	}
 }
 
 func (m Model) Init() tea.Cmd {
 	if m.state == stateCopying {
-		// If started with CLI args
-		m.startTime = time.Now() // Start timing
+		m.startTime = time.Now()
 		return startCopyWrapper(m.offloader)
 	}
-	// Always init filepicker just in case
-	return m.filepicker.Init() // Do we need to init volList via Cmd? Usually not unless it has IO.
+	// Init by loading volumes for browsing
+	return loadRootsCmd
 }
+
+func loadRootsCmd() tea.Msg {
+	items := []list.Item{}
+
+	// Quick access to Volumes
+	volumes, _ := offload.GetVolumes()
+	for _, v := range volumes {
+		items = append(items, fileItem{title: "DISK: " + v.Name, desc: v.Path, path: v.Path, isDir: true})
+	}
+
+	// Home directory
+	home, _ := os.UserHomeDir()
+	items = append(items, fileItem{title: "HOME", desc: home, path: home, isDir: true})
+
+	return directoryLoadedMsg{items: items, path: "/"}
+}
+
+func loadDirCmd(path string) tea.Cmd {
+	return func() tea.Msg {
+		entries, err := os.ReadDir(path)
+		if err != nil {
+			return errMsg{err} // Need to handle
+		}
+
+		items := []list.Item{}
+		// Parent directory logic handled by "Left" key, but could add ".." here too
+
+		for _, e := range entries {
+			// Skip hidden?
+			if len(e.Name()) > 0 && e.Name()[0] == '.' {
+				continue
+			}
+
+			info, _ := e.Info()
+			desc := "File"
+			if e.IsDir() {
+				desc = "Directory"
+			} else {
+				desc = fmt.Sprintf("%d bytes", info.Size())
+			}
+
+			items = append(items, fileItem{
+				title: e.Name(),
+				desc:  desc,
+				path:  filepath.Join(path, e.Name()),
+				isDir: e.IsDir(),
+			})
+		}
+
+		// Sort: Directories first, then files
+		sort.Slice(items, func(i, j int) bool {
+			iDir := items[i].(fileItem).isDir
+			jDir := items[j].(fileItem).isDir
+			if iDir != jDir {
+				return iDir
+			}
+			return items[i].(fileItem).title < items[j].(fileItem).title
+		})
+
+		return directoryLoadedMsg{items: items, path: path}
+	}
+}
+
+type directoryLoadedMsg struct {
+	items []list.Item
+	path  string
+}
+
+type errMsg struct{ err error }
 
 // ... Messages ...
 type progressMsg struct {
@@ -207,55 +290,126 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Quit
 		}
 
+		// Common Navigation
+		if m.state == stateSelectingSource || m.state == stateSelectingDest {
+			var activeList *list.Model
+			if m.state == stateSelectingSource {
+				activeList = &m.srcList
+			} else {
+				activeList = &m.dstList
+			}
+
+			// Right Key or Enter: Enter Directory
+			if msg.String() == "right" || msg.Type == tea.KeyEnter {
+				if i, ok := activeList.SelectedItem().(fileItem); ok {
+					if i.isDir {
+						return m, loadDirCmd(i.path)
+					}
+				}
+				return m, nil
+			}
+
+			// Left Key: Go Up
+			if msg.String() == "left" {
+				if m.currentPath != "/" && m.currentPath != "" {
+					parent := filepath.Dir(m.currentPath)
+					// If we are at root volumes list (simulated root), don't go further up easily
+					// But for now, let's just go up
+					return m, loadDirCmd(parent)
+				}
+				// If at top level specific logic?
+				return m, loadRootsCmd
+			}
+
+			// Space: Select Folder/File
+			if msg.String() == " " {
+				if i, ok := activeList.SelectedItem().(fileItem); ok {
+					if m.state == stateSelectingSource {
+						m.srcPath = i.path
+						m.state = stateSelectingDest
+						m.currentPath = "" // Reset for Dest Browsing to force loadRootsCmd logic if needed, or better yet, trigger loadRootsCmd
+						// We need to trigger loadRootsCmd explicitly for Dest
+						return m, loadRootsCmd
+					} else {
+						// Destination Selected
+						selectedDst := i.path
+						// If selected a file as dest (unlikely but possible), take dir
+						if !i.isDir {
+							selectedDst = filepath.Dir(i.path)
+						}
+						// Logic: Copy src to dst/srcBase
+						fileName := filepath.Base(m.srcPath)
+						finalDst := filepath.Join(selectedDst, fileName)
+
+						m.dstPaths = append(m.dstPaths, finalDst)
+
+						// Transition to Confirmation
+						m.state = stateConfirmAddDest
+						return m, nil
+					}
+				}
+			}
+
+			// Refresh
+			if msg.String() == "r" {
+				if m.currentPath == "" || m.currentPath == "/" {
+					return m, loadRootsCmd
+				}
+				return m, loadDirCmd(m.currentPath)
+			}
+		}
+
+		// Handle Confirmation State
+		if m.state == stateConfirmAddDest {
+			switch msg.String() {
+			case "y", "Y":
+				m.state = stateSelectingDest
+				m.currentPath = "" // Reset browsing
+				return m, loadRootsCmd
+			case "n", "N", "enter":
+				m.state = stateCopying
+				m.offloader = offload.NewOffloader(m.srcPath, m.dstPaths...)
+				m.startTime = time.Now()
+				return m, startCopyWrapper(m.offloader)
+			}
+		}
+
 	case tea.WindowSizeMsg:
-		m.volList.SetWidth(msg.Width)
-		m.volList.SetHeight(14) // Fixed height for list
+		m.width = msg.Width
+		m.height = msg.Height
+		m.srcList.SetWidth(msg.Width)
+		m.srcList.SetHeight(14)
+		m.dstList.SetWidth(msg.Width)
+		m.dstList.SetHeight(14)
+
+	case directoryLoadedMsg:
+		m.currentPath = msg.path
+		if m.state == stateSelectingSource {
+			cmd = m.srcList.SetItems(msg.items)
+			m.srcList.Title = "Source Browser: " + msg.path
+		} else {
+			cmd = m.dstList.SetItems(msg.items)
+			m.dstList.Title = "Dest Browser: " + msg.path
+		}
+		return m, cmd
 	}
 
-	switch m.state {
-	case stateSelectingSource:
-		m.filepicker, cmd = m.filepicker.Update(msg)
-		if didSelect, path := m.filepicker.DidSelectFile(msg); didSelect {
-			m.srcPath = path
-			m.state = stateSelectingDest
-
-			// Load Volumes
-			volumes, err := offload.GetVolumes()
-			var items []list.Item
-			if err != nil {
-				// Handle error? Just show empty or error
-				items = append(items, volItem{title: "Error listing volumes", desc: err.Error()})
-			} else {
-				for _, v := range volumes {
-					items = append(items, volItem{title: v.Name, desc: v.Path, path: v.Path})
-				}
-			}
-			cmd = m.volList.SetItems(items)
-			return m, cmd
-		}
+	// Update active list
+	if m.state == stateSelectingSource {
+		m.srcList, cmd = m.srcList.Update(msg)
 		return m, cmd
-
-	case stateSelectingDest:
-		m.volList, cmd = m.volList.Update(msg)
-		if msg, ok := msg.(tea.KeyMsg); ok && msg.Type == tea.KeyEnter {
-			if selectedItem, ok := m.volList.SelectedItem().(volItem); ok {
-				if selectedItem.path != "" {
-					// Construct destination path: Volume/Filename
-					// We should probably check if m.srcPath is not empty, but flow guarantees it
-					fileName := filepath.Base(m.srcPath)
-					m.dstPath = filepath.Join(selectedItem.path, fileName) // Default to root of volume
-
-					// Transition to copy
-					m.state = stateCopying
-					m.offloader = offload.NewOffloader(m.srcPath, m.dstPath)
-					m.startTime = time.Now()
-					return m, startCopyWrapper(m.offloader)
-				}
-			}
-		}
+	}
+	if m.state == stateSelectingDest {
+		m.dstList, cmd = m.dstList.Update(msg)
 		return m, cmd
+	}
 
-	case stateCopying:
+	// Copying state update logic (keep existing)
+	if m.state == stateCopying || m.state == stateVerifying || m.state == stateDone {
+		// ... existing copy logic ...
+		// We need to bring back the copy logic which got truncated in previous steps/edits if I'm not careful.
+		// Since I am replacing the whole block, I must duplicate the copy logic here.
+
 		switch msg := msg.(type) {
 		case progressMsg:
 			m.status = "Copying..."
@@ -284,16 +438,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.verifying = true
 			m.state = stateVerifying
 			return m, startVerifyCmd(m.offloader)
-		}
 
-		if _, ok := msg.(progress.FrameMsg); ok {
-			progressModel, cmd := m.progress.Update(msg)
-			m.progress = progressModel.(progress.Model)
-			return m, cmd
-		}
-
-	case stateVerifying:
-		if msg, ok := msg.(verifyFinishedMsg); ok {
+		case verifyFinishedMsg:
+			// ... verification logic ...
 			m.done = true
 			m.verifying = false
 			m.state = stateDone
@@ -305,18 +452,35 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			} else if msg.success {
 				m.status = "✅ Verification successful!"
 
-				// Generate Report
-				reportPath := m.dstPath + ".pdf"
-				if err := report.GeneratePDF(reportPath, m.offloader, m.startTime, m.endTime); err != nil {
-					m.status += fmt.Sprintf("\n⚠️ Report generation failed: %v", err)
-				} else {
-					m.status += fmt.Sprintf("\n📄 Report saved to: %s", reportPath)
+				// Reports
+				for _, dst := range m.dstPaths {
+					// PDF
+					reportPath := dst + ".pdf"
+					if err := report.GeneratePDF(reportPath, m.offloader, m.startTime, m.endTime); err != nil {
+						m.status += fmt.Sprintf("\n⚠️ Report generation failed for %s: %v", dst, err)
+					} else {
+						m.status += fmt.Sprintf("\n📄 Report saved to: %s", reportPath)
+					}
+
+					// MHL
+					mhlPath := dst + ".mhl"
+					if err := mhl.GenerateMHL(mhlPath, m.offloader.Files); err != nil {
+						m.status += fmt.Sprintf("\n⚠️ MHL generation failed for %s: %v", dst, err)
+					} else {
+						m.status += fmt.Sprintf("\n📄 MHL saved to: %s", mhlPath)
+					}
 				}
 			} else {
 				m.status = "❌ Checksum mismatch!"
 				m.err = fmt.Errorf("checksum mismatch")
 			}
 			return m, tea.Quit
+		}
+
+		if _, ok := msg.(progress.FrameMsg); ok {
+			progressModel, cmd := m.progress.Update(msg)
+			m.progress = progressModel.(progress.Model)
+			return m, cmd
 		}
 	}
 
@@ -327,22 +491,45 @@ func (m Model) View() string {
 	s := titleStyle.Render(logoASCII) + "\n"
 
 	if m.state == stateSelectingSource {
-		s += "Select Source File:\n\n"
-		s += m.filepicker.View() + "\n"
-		s += instructionStyle.Render("Use arrow keys to navigate, Enter to select.")
+		s += "BROWSE SOURCE:\n"
+		s += "(Right/Enter: Open, Left: Back, Space: Select)\n"
+		s += fmt.Sprintf("Path: %s\n\n", m.currentPath)
+		s += m.srcList.View()
+		return s
+	}
+
+	// Handle Confirmation State
+	if m.state == stateConfirmAddDest {
+		s += fmt.Sprintf("Source: %s\n", m.srcPath)
+		s += "Destinations:\n"
+		for i, d := range m.dstPaths {
+			s += fmt.Sprintf("  %d. %s\n", i+1, d)
+		}
+		s += "\nAdd another destination? (y/N)"
 		return s
 	}
 
 	if m.state == stateSelectingDest {
-		s += fmt.Sprintf("Source: %s\n", m.srcPath)
-		s += "Select Destination Volume:\n"
-		s += m.volList.View()
+		s += fmt.Sprintf("Source Selected: %s\n", m.srcPath)
+		if len(m.dstPaths) > 0 {
+			s += "Destinations Selected:\n"
+			for _, d := range m.dstPaths {
+				s += fmt.Sprintf("  - %s\n", d)
+			}
+		}
+		s += "\nBROWSE DESTINATION:\n"
+		s += "(Right/Enter: Open, Left: Back, Space: Select)\n"
+		s += fmt.Sprintf("Path: %s\n\n", m.currentPath)
+		s += m.dstList.View()
 		return s
 	}
 
 	// Copying/Verifying/Done View
 	s += fmt.Sprintf("Source: %s\n", m.srcPath)
-	s += fmt.Sprintf("Dest:   %s\n", m.dstPath)
+	s += "Destinations:\n"
+	for _, d := range m.dstPaths {
+		s += fmt.Sprintf("  - %s\n", d)
+	}
 	s += "\n"
 
 	if m.err != nil {
