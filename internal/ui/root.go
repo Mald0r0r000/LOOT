@@ -86,12 +86,10 @@ func (m RootModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.menu.choice = "" // Reset choice
 
 			switch choice {
-			case "Backup Simple":
+			case "OFFLOAD":
 				m.view = viewCopy
 				m.copy = InitialModel("", "") // Fresh start
 				return m, m.copy.Init()
-			case "Offload Multi-Target":
-				// Placeholder
 			case "Volume Info":
 				m.view = viewVolumeInfo
 			case "Readme":

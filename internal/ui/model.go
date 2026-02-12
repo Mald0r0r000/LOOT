@@ -474,7 +474,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.status = "❌ Checksum mismatch!"
 				m.err = fmt.Errorf("checksum mismatch")
 			}
-			return m, tea.Quit
+			return m, nil
 		}
 
 		if _, ok := msg.(progress.FrameMsg); ok {
@@ -537,10 +537,11 @@ func (m Model) View() string {
 	}
 
 	if m.done {
+		msg := m.status
 		if m.status == "✅ Verification successful!" {
-			return s + completedStyle.Render(m.status) + "\n"
+			msg = completedStyle.Render(m.status)
 		}
-		return s + m.status
+		return s + msg + "\n\n" + instructionStyle.Render("(Press 'q' to return to menu)")
 	}
 
 	s += progressStyle.Render(m.progress.View()) +
