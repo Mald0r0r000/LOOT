@@ -30,7 +30,7 @@
 
 ### Build from Source
 ```bash
-git clone https://github.com/antoinebedos/loot.git
+git clone https://github.com/Mald0r0r000/LOOT.git
 cd loot
 go build -o loot cmd/loot/main.go
 mv loot /usr/local/bin/ # Optional
