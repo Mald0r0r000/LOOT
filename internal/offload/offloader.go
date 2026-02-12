@@ -114,6 +114,11 @@ func (o *Offloader) Copy(progressChan chan<- ProgressInfo) error {
 				return err
 			}
 
+			// Skip .DS_Store
+			if info.Name() == ".DS_Store" {
+				return nil
+			}
+
 			relPath, err := filepath.Rel(o.Source, path)
 			if err != nil {
 				return err
@@ -189,48 +194,13 @@ func (o *Offloader) copyFileMulti(src string, dests []string, t *tracker) error 
 		writers = append(writers, f)
 	}
 
-	// 3. MultiWriter
-	multiDest := io.MultiWriter(writers...)
+	// 3. MultiWriter (Not used here if we loop manually, but good practice to know writers are ready)
+	// multiDest := io.MultiWriter(writers...)
 
-	// 4. Hashing (Calculated during copy)
-	// Note: We are calculating Source Hash here.
-	// But where do we store it if we process multiple files?
-	// The TeeReader approach is great for single file or verifying *while* copying.
-	// But `Verify` method usually runs *after* copy to ensure bits on disk are correct.
-	// However, calculating Source Hash here saves a read pass on source.
-	// Let's ignore the hash calculation here for simplicity of migration vs existing Verify() logic,
-	// OR we can store it to optimize verification later.
-	// The prompt suggested: "Utilise io.TeeReader pour calculer le xxHash de la source pendant la lecture."
-	// Let's do it, but we need to pass it out or store it.
-	// Since we might be inside a Walk loop, we can't easily update global o.SourceHash for just one file.
-	// We should probably just do the Copy here.
-	// Optimization: valid, but let's stick to standard Copy first to ensure MultiWriter works.
-	// Actually, let's add the hasher as requested, it's "elegant".
-
+	// 4. Custom Loop for Copy + Progress + Hash
 	hasher := xxhash.New()
-	readerWithHash := io.TeeReader(srcFile, hasher)
 
-	// 5. Copy
-	buf := make([]byte, o.BufferSize)
-	// We can't use io.Copy with buffer directly easily without wrapping,
-	// but io.Copy uses 32kb buffer. io.CopyBuffer allows setting it.
-
-	if _, err := io.CopyBuffer(multiDest, readerWithHash, buf); err != nil {
-		return err
-	}
-
-	// Manual tracker update? io.CopyBuffer doesn't callback.
-	// We need our custom loop if we want progress updates.
-	// Let's revert to custom loop for Progress + MultiWriter + Hash
-
-	// Reset to start for custom loop
-	srcFile.Seek(0, 0)
-	hasher.Reset()
-	// Re-open/truncate dests? io.Create truncates.
-	// Actually, doing TeeReader inside the loop is tricky with buffer.
-	// Easier: Just Hash + MultiWrite in loop.
-
-	// Re-implement loop:
+	// We use our custom loop to handle progress updates and hashing simultaneously
 	return o.copyFileMultiLoop(srcFile, writers, hasher, t, src)
 }
 
@@ -297,6 +267,12 @@ func (o *Offloader) verifyDir() (bool, error) {
 		if err != nil {
 			return err
 		}
+
+		// Skip .DS_Store
+		if info.Name() == ".DS_Store" {
+			return nil
+		}
+
 		if !info.IsDir() {
 			srcH, err := calculateXXHash(path)
 			if err != nil {
