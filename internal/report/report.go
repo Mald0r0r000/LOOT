@@ -23,27 +23,42 @@ func GeneratePDF(path string, o *offload.Offloader, startTime, endTime time.Time
 
 	// File Details
 	pdf.SetFont("Arial", "B", 14)
-	pdf.Cell(40, 10, "File Details")
+	pdf.Cell(40, 10, "Job Details")
 	pdf.Ln(8)
 
 	pdf.SetFont("Arial", "", 12)
-	pdf.Cell(40, 10, fmt.Sprintf("Source: %s", o.Source))
+	pdf.Cell(40, 8, fmt.Sprintf("Source:      %s", o.Source))
 	pdf.Ln(6)
-	pdf.Cell(40, 10, fmt.Sprintf("Destination: %s", o.Destination))
+	pdf.Cell(40, 8, fmt.Sprintf("Destination: %s", o.Destination))
+	pdf.Ln(6)
+	pdf.Cell(40, 8, fmt.Sprintf("Files:       %d", len(o.Files)))
+	pdf.Ln(6)
+
+	// Calculate total size from files list to be accurate
+	var totalSize int64
+	for _, f := range o.Files {
+		totalSize += f.Size
+	}
+	pdf.Cell(40, 8, fmt.Sprintf("Total Size:  %s", offload.FormatBytes(uint64(totalSize))))
 	pdf.Ln(8)
 
 	// Transfer Stats
 	duration := endTime.Sub(startTime)
+	seconds := duration.Seconds()
+	speedBps := float64(totalSize) / seconds
+
 	pdf.SetFont("Arial", "B", 14)
 	pdf.Cell(40, 10, "Transfer Statistics")
 	pdf.Ln(8)
 
 	pdf.SetFont("Arial", "", 12)
-	pdf.Cell(40, 10, fmt.Sprintf("Start Time: %s", startTime.Format(time.Kitchen)))
+	pdf.Cell(40, 8, fmt.Sprintf("Start Time: %s", startTime.Format("15:04:05")))
 	pdf.Ln(6)
-	pdf.Cell(40, 10, fmt.Sprintf("End Time: %s", endTime.Format(time.Kitchen)))
+	pdf.Cell(40, 8, fmt.Sprintf("End Time:   %s", endTime.Format("15:04:05")))
 	pdf.Ln(6)
-	pdf.Cell(40, 10, fmt.Sprintf("Duration: %v", duration))
+	pdf.Cell(40, 8, fmt.Sprintf("Duration:   %v", duration.Round(time.Second)))
+	pdf.Ln(6)
+	pdf.Cell(40, 8, fmt.Sprintf("Avg Speed:  %s/s", offload.FormatBytes(uint64(speedBps))))
 	pdf.Ln(8)
 
 	// Verification
