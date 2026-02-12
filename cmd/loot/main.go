@@ -10,24 +10,14 @@ import (
 )
 
 func main() {
-	var src, dst string
+	// For now, we launch directly into the Dashboard.
+	// CLI args support can be re-added later by passing them to NewRootModel
+	// or implementing a specific "Headless" mode.
 
-	if len(os.Args) >= 3 {
-		src = os.Args[1]
-		dst = os.Args[2]
+	// Check if terminal is interactive?
+	// For this version: Always Dashboard.
 
-		// Verify source exists
-		if _, err := os.Stat(src); os.IsNotExist(err) {
-			fmt.Printf("Error: Source file '%s' does not exist.\n", src)
-			os.Exit(1)
-		}
-	} else if len(os.Args) == 2 {
-		fmt.Println("Usage: loot <source> <destination>")
-		fmt.Println("       loot (for interactive mode)")
-		os.Exit(1)
-	}
-
-	p := tea.NewProgram(ui.InitialModel(src, dst))
+	p := tea.NewProgram(ui.NewRootModel())
 	if _, err := p.Run(); err != nil {
 		fmt.Printf("Error running loot: %v\n", err)
 		os.Exit(1)

@@ -15,3 +15,21 @@
 # vendor/
 /loot
 /main
+
+# System
+.DS_Store
+**/.DS_Store
+
+# IDE
+.vscode
+.idea
+
+# Build
+loot
+
+# Test Data
+CARD_VIRTUEL/
+DESTINATION_TEST_*/
+*.pdf
+*.mhl
+loot_debug.log
