@@ -43,6 +43,12 @@ type Config struct {
 	// Resume
 	SkipExisting bool
 
+	// Metadata
+	JobName      string
+	Camera       string
+	Reel         string
+	MetadataMode string
+
 	// Version info
 	Version string
 }
@@ -61,6 +67,7 @@ func DefaultConfig() *Config {
 		Quiet:        false,
 		Verbose:      false,
 		SkipExisting: false,
+		MetadataMode: "hybrid",
 	}
 }
 
@@ -83,6 +90,10 @@ func ParseFlags(version string) (*Config, error) {
 	flag.IntVar(&cfg.Concurrency, "c", 4, "Number of parallel file copies (shorthand)")
 	flag.BoolVar(&cfg.SkipExisting, "skip-existing", false, "Skip files that exist at destination")
 	flag.BoolVar(&cfg.SkipExisting, "resume", false, "Resume interrupted transfer (alias for --skip-existing)")
+	flag.StringVar(&cfg.JobName, "job-name", "", "Job name for report metadata")
+	flag.StringVar(&cfg.Camera, "camera", "", "Camera identifier (e.g. 'A', 'B')")
+	flag.StringVar(&cfg.Reel, "reel", "", "Reel identifier (e.g. '001', 'A002')")
+	flag.StringVar(&cfg.MetadataMode, "metadata-mode", "hybrid", "Metadata extraction mode: hybrid (default), header, exiftool, off")
 
 	versionFlag := flag.Bool("version", false, "Print version")
 	v := flag.Bool("v", false, "Print version (shorthand)")

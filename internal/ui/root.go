@@ -39,7 +39,7 @@ type RootModel struct {
 func NewRootModel(cfg *config.Config) RootModel {
 	return RootModel{
 		view:     viewMenu,
-		menu:     InitialMenuModel(),
+		menu:     InitialMenuModel(cfg),
 		copy:     InitialModelWithConfig(cfg),
 		settings: InitialSettingsModel(cfg),
 		config:   cfg,
@@ -101,6 +101,14 @@ func (m RootModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 			switch choice {
 			case "OFFLOAD":
+				// Debug
+				if m.config.JobName != "" {
+					// We need to print this visibly or log it.
+					// Since TUI is running, stdout is hijacked.
+					// Let's rely on the user seeing it in Settings view for now.
+					// Or write to a log file.
+				}
+
 				m.view = viewCopy
 				// Create a clean copy of config to avoid state persistence
 				// Create a clean copy of config to avoid state persistence

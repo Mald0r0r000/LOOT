@@ -73,6 +73,7 @@ const (
 	stateDone
 	stateJobManager
 	stateErrorDetails
+	stateDryRun
 )
 
 // fileItem implements list.Item
@@ -140,6 +141,9 @@ type Model struct {
 
 	width  int
 	height int
+
+	// Dry Run
+	dryRunResult *offload.DryRunResult
 
 	config *config.Config
 }
@@ -445,6 +449,24 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 
+		// Dry Run Interaction
+		if m.state == stateDryRun {
+			if msg.String() == "c" || msg.String() == "C" {
+				// Continue to Actual Copy
+				m.state = stateCopying
+				j := job.NewJob(m.config)
+				j.Offloader.Destinations = m.dstPaths
+				m.queue.Add(j)
+				return m, nil
+			}
+			if msg.String() == "q" || msg.String() == "Q" || msg.String() == "esc" {
+				// Cancel back to menu
+				m.Reset(m.config) // Reset state but keep config
+				return m, loadRootsCmd
+			}
+			return m, nil
+		}
+
 		// Common Navigation
 		if m.state == stateSelectingSource || m.state == stateSelectingDest {
 			var activeList *list.Model
@@ -522,11 +544,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.currentPath = "" // Reset browsing
 				return m, loadRootsCmd
 			case "n", "N", "enter":
-				m.state = stateCopying
-				// Create and add job
+				// Update config with selections
 				m.config.Source = m.srcPath
 				m.config.Destination = m.dstPaths[0]
 
+				if m.config.DryRun {
+					m.state = stateDryRun
+					return m, performDryRunCmd(m.config, m.dstPaths)
+				}
+
+				m.state = stateCopying
+				// Create and add job
 				j := job.NewJob(m.config)
 				j.Offloader.Destinations = m.dstPaths
 				m.queue.Add(j)
@@ -637,6 +665,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.srcList.SetHeight(14)
 		m.dstList.SetWidth(msg.Width)
 		m.dstList.SetHeight(14)
+		// Update progress bar width (minus padding)
+		m.progress.Width = msg.Width - 10
+		if m.progress.Width < 10 {
+			m.progress.Width = 10
+		}
 
 	case directoryLoadedMsg:
 		m.currentPath = msg.path
@@ -652,6 +685,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case errMsg:
 		m.err = msg.err
 		m.status = fmt.Sprintf("Error: %v", msg.err)
+		return m, nil
+
+	case dryRunResultMsg:
+		m.dryRunResult = msg.result
 		return m, nil
 	}
 
@@ -727,6 +764,29 @@ func (m Model) View() string {
 	}
 
 	// Copying/Verifying/Done View
+	if m.state == stateDryRun {
+		s += titleStyle.Render("DRY RUN SIMULATION") + "\n\n"
+		s += fmt.Sprintf("Source: %s\n", m.config.Source)
+		if m.dryRunResult != nil {
+			s += fmt.Sprintf("Files to copy: %d\n", len(m.dryRunResult.Files))
+			s += fmt.Sprintf("Total Size:    %s\n\n", offload.FormatBytes(uint64(m.dryRunResult.TotalSize)))
+			s += "Destinations:\n"
+			for _, d := range m.dryRunResult.Destinations {
+				status := "✅ OK"
+				if !d.CanFit {
+					status = "❌ INSUFFICIENT SPACE"
+				}
+				s += fmt.Sprintf("  - %s\n", d.Path)
+				s += fmt.Sprintf("    Free Space: %s\n", offload.FormatBytes(d.FreeSpace))
+				s += fmt.Sprintf("    Status:     %s\n", status)
+			}
+		} else {
+			s += "Simulating...\n" + m.spinner.View()
+		}
+		s += "\n\n" + instructionStyle.Render("(Press 'c' to continue Copy, 'q' to cancel)")
+		return s
+	}
+
 	s += fmt.Sprintf("Source: %s\n", m.srcPath)
 	s += "Destinations:\n"
 	for _, d := range m.dstPaths {
@@ -757,4 +817,19 @@ func (m Model) View() string {
 	}
 
 	return s
+}
+
+type dryRunResultMsg struct {
+	result *offload.DryRunResult
+}
+
+func performDryRunCmd(cfg *config.Config, dests []string) tea.Cmd {
+	return func() tea.Msg {
+		o := offload.NewOffloaderWithConfig(cfg, cfg.Source, dests...)
+		res, err := o.DryRun()
+		if err != nil {
+			return errMsg{err}
+		}
+		return dryRunResultMsg{result: res}
+	}
 }

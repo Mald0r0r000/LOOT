@@ -20,7 +20,35 @@ func GeneratePDF(path string, o *offload.Offloader, startTime, endTime time.Time
 
 	pdf.SetFont("Arial", "", 12)
 	pdf.Cell(40, 10, fmt.Sprintf("Date: %s", time.Now().Format(time.RFC1123)))
-	pdf.Ln(10)
+	pdf.Ln(8)
+
+	jobName := o.Config.JobName
+	if jobName != "" {
+		pdf.SetFont("Arial", "B", 12)
+		pdf.Cell(40, 10, fmt.Sprintf("Job Name: %s", jobName))
+		pdf.Ln(6)
+	}
+
+	// Metadata Line
+	meta := ""
+	if o.Config.Camera != "" {
+		meta += fmt.Sprintf("Camera: %s    ", o.Config.Camera)
+	}
+	if o.Config.Reel != "" {
+		meta += fmt.Sprintf("Reel: %s", o.Config.Reel)
+	}
+
+	if meta != "" {
+		pdf.SetFont("Arial", "", 12)
+		pdf.Cell(40, 10, meta)
+		pdf.Ln(10)
+	} else {
+		if jobName != "" {
+			pdf.Ln(4)
+		} else {
+			pdf.Ln(2)
+		}
+	}
 
 	// File Details
 	pdf.SetFont("Arial", "B", 14)
@@ -89,27 +117,60 @@ func GeneratePDF(path string, o *offload.Offloader, startTime, endTime time.Time
 			pdf.Cell(40, 10, "STATUS: CHECKSUM MISMATCH")
 		}
 	} else {
-		// List files and their hashes
-		pdf.SetFont("Arial", "B", 10)
-		pdf.Cell(100, 8, "File")
-		pdf.Cell(60, 8, "xxHash")
+		// List files and their hashes (and metadata)
+		pdf.SetFont("Arial", "B", 9)
+		pdf.Cell(55, 8, "File")
+		pdf.Cell(20, 8, "Back/Codec")
+		pdf.Cell(20, 8, "Res")
+		pdf.Cell(15, 8, "FPS")
+		pdf.Cell(25, 8, "TC")
+		pdf.Cell(20, 8, "Dur")
+		pdf.Cell(35, 8, "Hash")
 		pdf.Ln(8)
 
-		pdf.SetFont("Arial", "", 9)
+		pdf.SetFont("Arial", "", 8)
 		for _, f := range o.Files {
 			// Get relative path shortened
 			relPath := f.RelPath
-			if len(relPath) > 50 {
-				relPath = "..." + relPath[len(relPath)-47:]
+			if len(relPath) > 30 {
+				relPath = "..." + relPath[len(relPath)-27:]
+			}
+
+			// Metadata
+			codec := "-"
+			res := "-"
+			fps := "-"
+			tc := "-"
+			dur := "-"
+
+			if f.Metadata != nil {
+				codec = f.Metadata.Codec
+				res = f.Metadata.Resolution
+				fps = f.Metadata.FrameRate
+				tc = f.Metadata.Timecode
+				dur = f.Metadata.Duration
+
+				// Truncate codec if too long
+				if len(codec) > 10 {
+					codec = codec[:10]
+				}
 			}
 
 			hashStr := f.Hash.String()
-			// Assuming Hash is Source Hash. Destination check implied by successful copy phase?
-			// Actually Offloader structure doesn't store per-file DestHash, only assumes verify passed if job succeeded?
-			// But user wants to see the hash.
+			// Shorten hash for display if needed or keep full?
+			// xxHash is 16 chars, MD5 is 32. 35mm width fits ~18 chars at size 8?
+			// Let's take first 16 chars
+			if len(hashStr) > 16 {
+				hashStr = hashStr[:16] + "..."
+			}
 
-			pdf.Cell(100, 6, relPath)
-			pdf.Cell(60, 6, hashStr)
+			pdf.Cell(55, 6, relPath)
+			pdf.Cell(20, 6, codec)
+			pdf.Cell(20, 6, res)
+			pdf.Cell(15, 6, fps)
+			pdf.Cell(25, 6, tc)
+			pdf.Cell(20, 6, dur)
+			pdf.Cell(35, 6, hashStr)
 			pdf.Ln(6)
 		}
 

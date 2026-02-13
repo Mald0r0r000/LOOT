@@ -7,10 +7,12 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"syscall"
 	"time"
 
 	"loot/internal/config"
 	"loot/internal/hash"
+	"loot/internal/metadata"
 )
 
 const BufferSize = 4 * 1024 * 1024 // 4MB
@@ -23,10 +25,11 @@ type ProgressInfo struct {
 }
 
 type FileRes struct {
-	RelPath string
-	Size    int64
-	ModTime time.Time
-	Hash    hash.HashResult
+	RelPath  string
+	Size     int64
+	ModTime  time.Time
+	Hash     hash.HashResult
+	Metadata *metadata.Metadata
 }
 
 // Offloader handles the copy process
@@ -41,6 +44,9 @@ type Offloader struct {
 
 	Files  []FileRes
 	Config *config.Config
+
+	// Temporary cache for metadata extracted during Copy
+	metadataCache sync.Map
 }
 
 func NewOffloader(src string, dsts ...string) *Offloader {
@@ -156,6 +162,15 @@ func (o *Offloader) Copy(ctx context.Context, progressChan chan<- ProgressInfo) 
 						for _, dstRoot := range o.Destinations {
 							dstPaths = append(dstPaths, filepath.Join(dstRoot, j.relPath))
 						}
+						// Extract Metadata BEFORE copy (as requested for optimization/streaming)
+						// This primes the OS cache for the header at least.
+						// We ignore error here, we'll try again in verify or just log it?
+						// For now, best effort.
+						meta, _ := metadata.Extract(j.path, o.Config.MetadataMode)
+						if meta != nil {
+							o.metadataCache.Store(j.relPath, meta)
+						}
+
 						if err := o.copyFileMulti(ctx, j.path, dstPaths, t); err != nil {
 							select {
 							case results <- err:
@@ -431,12 +446,22 @@ func (o *Offloader) verifyDir() (bool, error) {
 				}
 			}
 
+			// Extract Metadata (best effort)
+			var paramMeta *metadata.Metadata
+			if cached, ok := o.metadataCache.Load(relPath); ok {
+				paramMeta = cached.(*metadata.Metadata)
+			} else {
+				// Fallback if missed during copy
+				paramMeta, _ = metadata.Extract(path, o.Config.MetadataMode)
+			}
+
 			// Store metadata (using Source Hash)
 			o.Files = append(o.Files, FileRes{
-				RelPath: relPath,
-				Size:    info.Size(),
-				ModTime: info.ModTime(),
-				Hash:    srcH,
+				RelPath:  relPath,
+				Size:     info.Size(),
+				ModTime:  info.ModTime(),
+				Hash:     srcH,
+				Metadata: paramMeta,
 			})
 		}
 		return nil
@@ -476,11 +501,14 @@ func (o *Offloader) verifyFile() (bool, error) {
 
 	// Metadata
 	info, _ := os.Stat(o.Source)
+	paramMeta, _ := metadata.Extract(o.Source, o.Config.MetadataMode) // Best effort
+
 	o.Files = append(o.Files, FileRes{
-		RelPath: filepath.Base(o.Source),
-		Size:    info.Size(),
-		ModTime: info.ModTime(),
-		Hash:    o.SourceHash,
+		RelPath:  filepath.Base(o.Source),
+		Size:     info.Size(),
+		ModTime:  info.ModTime(),
+		Hash:     o.SourceHash,
+		Metadata: paramMeta,
 	})
 
 	return true, nil
@@ -491,4 +519,92 @@ func calculateFileHash(path string, cfg *config.Config) (hash.HashResult, error)
 		return hash.CalculateFileHash(path, config.AlgoXXHash64, config.AlgoMD5)
 	}
 	return hash.CalculateFileHash(path, cfg.Algorithm)
+}
+
+// DryRunResult holds the results of a simulation
+type DryRunResult struct {
+	Source       string
+	Files        []FileRes
+	TotalSize    int64
+	Destinations []DestInfo
+}
+
+// DestInfo holds information about a destination
+type DestInfo struct {
+	Path      string
+	FreeSpace uint64
+	CanFit    bool
+}
+
+// DryRun simulates the copy operation
+func (o *Offloader) DryRun() (*DryRunResult, error) {
+	result := &DryRunResult{
+		Source: o.Source,
+	}
+
+	info, err := os.Stat(o.Source)
+	if err != nil {
+		return nil, fmt.Errorf("failed to stat source: %w", err)
+	}
+
+	if info.IsDir() {
+		err := filepath.Walk(o.Source, func(path string, info os.FileInfo, err error) error {
+			if err != nil {
+				return err
+			}
+			if info.Name() == ".DS_Store" {
+				return nil
+			}
+			if !info.IsDir() {
+				relPath, _ := filepath.Rel(o.Source, path)
+				result.Files = append(result.Files, FileRes{
+					RelPath:  relPath,
+					Size:     info.Size(),
+					ModTime:  info.ModTime(),
+					Metadata: nil, // No metadata in dry run
+				})
+				result.TotalSize += info.Size()
+			}
+			return nil
+		})
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		result.Files = append(result.Files, FileRes{
+			RelPath:  filepath.Base(o.Source),
+			Size:     info.Size(),
+			ModTime:  info.ModTime(),
+			Metadata: nil,
+		})
+		result.TotalSize = info.Size()
+	}
+
+	// Check destinations
+	for _, dst := range o.Destinations {
+		di := DestInfo{
+			Path: dst,
+		}
+
+		// Get free space (best effort)
+		// We use the parent directory if dst doesn't exist yet
+		checkPath := dst
+		if _, err := os.Stat(checkPath); os.IsNotExist(err) {
+			checkPath = filepath.Dir(checkPath)
+		}
+
+		var stat syscall.Statfs_t
+		if err := syscall.Statfs(checkPath, &stat); err == nil {
+			// Available blocks * block size
+			di.FreeSpace = uint64(stat.Bavail) * uint64(stat.Bsize)
+			di.CanFit = di.FreeSpace > uint64(result.TotalSize)
+		} else {
+			// If we can't check, assume yes but warn?
+			// For now, set FreeSpace to 0 (unknown)
+			di.CanFit = true // Optimistic
+		}
+		result.Destinations = append(result.Destinations, di)
+	}
+
+	return result, nil
 }

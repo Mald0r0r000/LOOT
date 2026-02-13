@@ -5,6 +5,7 @@ import (
 	"os"
 
 	"loot/internal/config"
+	"loot/internal/offload"
 	"loot/internal/ui"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -19,6 +20,32 @@ func main() {
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
+	}
+
+	// Dry Run
+	if cfg.DryRun {
+		o := offload.NewOffloaderWithConfig(cfg, cfg.Source, cfg.Destination)
+		res, err := o.DryRun()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error during dry run: %v\n", err)
+			os.Exit(1)
+		}
+
+		fmt.Println("=== DRY RUN SUMMARY ===")
+		fmt.Printf("Source: %s\n", res.Source)
+		fmt.Printf("Files found: %d\n", len(res.Files))
+		fmt.Printf("Total Size: %s\n", offload.FormatBytes(uint64(res.TotalSize)))
+		fmt.Println("\nDestinations:")
+		for _, dest := range res.Destinations {
+			status := "✅ OK"
+			if !dest.CanFit {
+				status = "❌ INSUFFICIENT SPACE"
+			}
+			fmt.Printf("  - %s\n", dest.Path)
+			fmt.Printf("    Free Space: %s\n", offload.FormatBytes(dest.FreeSpace))
+			fmt.Printf("    Status: %s\n", status)
+		}
+		return
 	}
 
 	// Interactive mode

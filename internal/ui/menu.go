@@ -3,6 +3,7 @@ package ui
 import (
 	"fmt"
 	"io"
+	"loot/internal/config"
 	"strings"
 
 	"github.com/charmbracelet/bubbles/list"
@@ -51,9 +52,10 @@ func (d itemDelegate) Render(w io.Writer, m list.Model, index int, listItem list
 type MenuModel struct {
 	list   list.Model
 	choice string
+	config *config.Config
 }
 
-func InitialMenuModel() MenuModel {
+func InitialMenuModel(cfg *config.Config) MenuModel {
 	items := []list.Item{
 		item("OFFLOAD"),
 		item("Volume Info"),
@@ -73,7 +75,7 @@ func InitialMenuModel() MenuModel {
 	l.Styles.PaginationStyle = paginationStyle
 	l.Styles.HelpStyle = helpStyle
 
-	return MenuModel{list: l}
+	return MenuModel{list: l, config: cfg}
 }
 
 func (m MenuModel) Init() tea.Cmd {
@@ -105,5 +107,26 @@ func (m MenuModel) Update(msg tea.Msg) (MenuModel, tea.Cmd) {
 }
 
 func (m MenuModel) View() string {
-	return "\n" + m.list.View()
+	s := "\n" + m.list.View()
+
+	// Add Footer with Settings
+	if m.config != nil {
+		dryRun := "OFF"
+		if m.config.DryRun {
+			dryRun = "ON"
+		}
+
+		footer := fmt.Sprintf("\n\n  Settings: Hash=%s | Meta=%s | DryRun=%s",
+			m.config.Algorithm,
+			m.config.MetadataMode,
+			dryRun,
+		)
+		if m.config.JobName != "" {
+			footer += fmt.Sprintf(" | Job=%s", m.config.JobName)
+		}
+
+		s += lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Render(footer)
+	}
+
+	return s
 }
