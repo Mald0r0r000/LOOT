@@ -702,7 +702,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, cmd
 	}
 
-	return m, nil
+	// Propagate messages to progress bar (required for animation)
+	newProgress, progressCmd := m.progress.Update(msg)
+	m.progress = newProgress.(progress.Model)
+	return m, progressCmd
 }
 
 func (m Model) View() string {
