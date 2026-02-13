@@ -33,3 +33,4 @@ DESTINATION_TEST_*/
 *.pdf
 *.mhl
 loot_debug.log
+Task_Part*.md
