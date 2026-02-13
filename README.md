@@ -17,11 +17,14 @@
 ## ✨ Features
 
 - **🚀 TUI Dashboard**: A modern, interactive terminal user interface built with [Bubble Tea](https://github.com/charmbracelet/bubbletea).
-- **🔒 Checksum Verification**: Uses **xxHash64** for extremely fast and reliable bit-for-bit verification.
-- **📂 Custom File Browser**: Navigate your file system naturally with a dual-pane interface (Source & Destination).
-- **📑 MHL Support**: Automatically generates standard **Media Hash List (MHL)** files (XML) for workflow compatibility.
+- **🔒 Checksum Verification**: Supports **xxHash64**, **MD5**, and **SHA256** for reliable bit-for-bit verification.
+- **⚡ Parallel Processing**: High-performance copy engine with configurable concurrency.
+- **📂 Custom File Browser**: Navigate your file system naturally with a dual-pane interface.
+- **📑 MHL Support**: Automatically generates **Media Hash List (MHL)** files.
 - **📄 PDF Reports**: Generates detailed PDF reports proving the integrity of the copy.
-- **💾 Volume Awareness**: Auto-detects mounted volumes in `/Volumes` for quick selection.
+- **💾 Volume Awareness**: Auto-detects mounted volumes in `/Volumes`.
+- **🔄 Job Management**: Queue, Pause, Cancel, and Retry offload jobs.
+- **⏯️ Resume Capability**: Skip existing verified files to resume interrupted transfers.
 
 ## 📦 Installation
 
@@ -30,7 +33,7 @@
 
 ### Build from Source
 ```bash
-git clone https://github.com/antoinebedos/loot.git
+git clone https://github.com/Mald0r0r000/LOOT.git
 cd loot
 go build -o loot cmd/loot/main.go
 mv loot /usr/local/bin/ # Optional
@@ -47,24 +50,48 @@ loot
 
 | Key | Action |
 | :--- | :--- |
-| **↑ / ↓** | Navigate lists |
-| **→ / Enter** | Enter directory |
-| **←** | Go up / Back |
-| **Space** | **Select** current folder as Source or Destination |
-| **r** | Refresh volume/file list |
-| **q / Esc** | Cancel / Back / Quit |
+| **↑ / ↓** | Navigate Menu / Lists |
+| **← / →** | Navigate Directory |
+| **Enter** | Enter Directory / Select Option |
+| **Space** | **Select** Source / Destination / Toggle Setting |
+| **Tab** | **Toggle Job Manager** |
+| **x / X** | Cancel Active Job |
+| **r / R** | Retry Failed/Cancelled Job |
+| **Esc / q** | Back / Cancel / Quit |
 
 ### Workflow
-1. **Select Source**: Browse to your camera card or source folder and press `Space`.
-2. **Select Destination**: Browse to your backup drive and press `Space`.
-3. **Copy & Verify**: LOOT handles the transfer, verification, and report generation automatically.
+1. **Settings (Optional)**: Select your preferred hash algorithm (xxHash, MD5, SHA256).
+2. **Select Source**: Browse to your camera card or source folder and press `Space`.
+3. **Select Destination**: Browse to your backup drive and press `Space`.
+4. **Copy & Verify**: LOOT handles the transfer, verification, and report generation automatically.
+5. **Monitor**: Use the Job Manager to track progress or cancel operations.
+
+### CLI Mode
+
+LOOT can also be used in headless mode for automation:
+
+```bash
+loot --source /path/to/card --dest /path/to/backup --md5 --concurrency 8 --json
+```
+
+**Flags:**
+- `--algorithm <algo>`: Set hash algorithm (xxhash64, md5, sha256)
+- `--dual-hash`: Calculate both xxHash and MD5
+- `--concurrency <N>`: Set number of parallel workers (Default: 4)
+- `--resume`: Skip existing files that match size/time
+- `--no-verify`: Skip verification phase
+- `--json`: Output results in JSON format
+- `--quiet`: Suppress output
+
 
 ## 🛠️ Roadmap
 
-- [ ] **Recursive Copy**: Full support for deep directory structures (Currently strictly flat file/folder logic for MVP).
-- [ ] **Multi-Target**: Offload to multiple drives simultaneously.
-- [ ] **xxHash128 / MD5**: Support for additional checksum algorithms.
-- [ ] **Resume**: Ability to resume interrupted transfers.
+- [x] **Recursive Copy**: Full support for deep directory structures.
+- [x] **Multi-Target**: Offload to multiple drives simultaneously.
+- [x] **xxHash128 / MD5**: Support for additional checksum algorithms (MD5, SHA256).
+- [x] **Resume**: Ability to resume interrupted transfers.
+- [ ] **Verification-Only Mode**: Verify existing backups without copying.
+- [ ] **xxHash128**: Implement xxHash128 support.
 
 ## 📝 License
 
