@@ -19,85 +19,68 @@
 - **🚀 TUI Dashboard**: A modern, interactive terminal user interface built with [Bubble Tea](https://github.com/charmbracelet/bubbletea).
 - **🔒 Checksum Verification**: Supports **xxHash64**, **MD5**, and **SHA256** for reliable bit-for-bit verification.
 - **⚡ Parallel Processing**: High-performance copy engine with configurable concurrency.
-- **📂 Custom File Browser**: Navigate your file system naturally with a dual-pane interface.
-- **📑 MHL Support**: Automatically generates **Media Hash List (MHL)** files.
-- **📄 PDF Reports**: Generates detailed PDF reports proving the integrity of the copy.
-- **💾 Volume Awareness**: Auto-detects mounted volumes in `/Volumes`.
-- **🔄 Job Management**: Queue, Pause, Cancel, and Retry offload jobs.
-- **⏯️ Resume Capability**: Skip existing verified files to resume interrupted transfers.
+- **📂 File Browser & Volume Awareness**: Direct navigation and auto-detection of `/Volumes`.
+- **📑 MHL & PDF Reports**: Generates industry-standard **Media Hash List (MHL)** and detailed **PDF Reports**.
+- **🎥 Metadata Extraction**: Extracts technical metadata (Resolution, Codec, FPS) from video files (supports R3D, MOV, MXF).
+- **🛡️ Merge Mode**: Safe copy logic that detects existing destinations and merges content instead of overwriting.
+- **🧪 Dry Run**: Simulate transfers without writing to disk to check space and file counts.
+- **🔄 Resume Capability**: Smartly skips existing valid files to resume interrupted jobs.
+- **⚙️ Runtime Configuration**: Adjust Hash Algo, Metadata Mode, and Job Name on the fly via Settings.
 
 ## 📦 Installation
+See [INSTALL.md](INSTALL.md) for detailed instructions on binaries, Go install, and building from source.
 
-### Prerequisites
-- Go 1.21 or higher
-
-### Build from Source
-```bash
-git clone https://github.com/Mald0r0r000/LOOT.git
-cd loot
-go build -o loot cmd/loot/main.go
-mv loot /usr/local/bin/ # Optional
-```
+## ❓ Troubleshooting
+Encountering issues? Check [TROUBLESHOOTING.md](TROUBLESHOOTING.md) for solutions to common problems.
 
 ## 🎮 Usage
 
-Run the tool:
+Run the tool interactively:
 ```bash
 loot
 ```
 
-### Controls
+### Key Bindings
 
 | Key | Action |
 | :--- | :--- |
-| **↑ / ↓** | Navigate Menu / Lists |
-| **← / →** | Navigate Directory |
-| **Enter** | Enter Directory / Select Option |
 | **Space** | **Select** Source / Destination / Toggle Setting |
+| **Enter** | Open Directory / Confirm Action |
 | **Tab** | **Toggle Job Manager** |
-| **x / X** | Cancel Active Job |
-| **r / R** | Retry Failed/Cancelled Job |
-| **Esc / q** | Back / Cancel / Quit |
+| **Esc** | Back / Settings Menu (from Root) |
+| **x** | Cancel Active Job |
+| **r** | Retry Failed Job |
+| **q** | Quit (if no active jobs) |
 
-### Workflow
-1. **Settings (Optional)**: Select your preferred hash algorithm (xxHash, MD5, SHA256).
-2. **Select Source**: Browse to your camera card or source folder and press `Space`.
-3. **Select Destination**: Browse to your backup drive and press `Space`.
-4. **Copy & Verify**: LOOT handles the transfer, verification, and report generation automatically.
-5. **Monitor**: Use the Job Manager to track progress or cancel operations.
+### Operations
+1. **Source**: Navigate and select source.
+2. **Destination**: Navigate and select destination(s). You can select multiple.
+3. **Settings**: Press `Esc` at the root menu to configure Hash Algo, Metadata Mode, etc.
+4. **Confirm**: Review the summary. If destination exists, **Merge Mode** will be offered.
+5. **Monitor**: Watch progress, speed, and ETA.
 
-### CLI Mode
-
-LOOT can also be used in headless mode for automation:
-
+### CLI Mode & Flags
 ```bash
-loot --source /path/to/card --dest /path/to/backup --md5 --concurrency 8 --json
+loot --source /card --dest /backup --md5 --job-name "Day01" --dry-run
 ```
 
-**Flags:**
-- `--algorithm <algo>`: Set hash algorithm (xxhash64, md5, sha256)
-- `--dual-hash`: Calculate both xxHash and MD5
-- `--concurrency <N>`: Set number of parallel workers (Default: 4)
-- `--resume`: Skip existing files that match size/time
-- `--no-verify`: Skip verification phase
-- `--json`: Output results in JSON format
-- `--quiet`: Suppress output
-
+**Common Flags:**
+- `--algorithm`: `xxhash64` (default), `md5`, `sha256`
+- `--metadata-mode`: `hybrid` (default), `header`, `exiftool`, `off`
+- `--concurrency`: Number of workers (default 4)
+- `--dry-run`: Simulate only
+- `--resume`: Skip existing files
 
 ## 🛠️ Roadmap
-
-- [x] **Recursive Copy**: Full support for deep directory structures.
-- [x] **Multi-Target**: Offload to multiple drives simultaneously.
-- [x] **xxHash128 / MD5**: Support for additional checksum algorithms (MD5, SHA256).
-- [x] **Resume**: Ability to resume interrupted transfers.
-- [ ] **Verification-Only Mode**: Verify existing backups without copying.
-- [ ] **xxHash128**: Implement xxHash128 support.
+- [x] **Metadata Extraction**
+- [x] **Dry Run Mode**
+- [x] **Merge/Resume Logic**
+- [ ] **Verification-Only Mode**
+- [ ] **xxHash128 Support**
 
 ## 📝 License
-
-Distributed under the MIT License. See `LICENSE` for more information.
+Distributed under the MIT License.
 
 ## 👨‍💻 Credits
-
 Developed by **Mald0r0r000**.
-Built with Go and the Charm ecosystem.
+
