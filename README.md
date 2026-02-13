@@ -33,6 +33,7 @@ See [INSTALL.md](INSTALL.md) for detailed instructions on binaries, Go install, 
 or you can easilly install it through Homebrew
 
 brew tap Mald0r0r000/loot
+
 brew install loot
 
 ## ❓ Troubleshooting
