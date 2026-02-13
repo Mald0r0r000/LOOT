@@ -146,6 +146,9 @@ type Model struct {
 	dryRunResult *offload.DryRunResult
 
 	config *config.Config
+
+	// State flags
+	destConflict bool
 }
 
 func InitialModel(src, dst string) Model {
@@ -520,6 +523,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 						m.dstPaths = append(m.dstPaths, finalDst)
 
+						// Check if destination exists (Merge check)
+						if _, err := os.Stat(finalDst); err == nil {
+							m.destConflict = true
+						} else {
+							m.destConflict = false
+						}
+
 						// Transition to Confirmation
 						m.state = stateConfirmAddDest
 						return m, nil
@@ -538,15 +548,42 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		// Handle Confirmation State
 		if m.state == stateConfirmAddDest {
-			switch msg.String() {
-			case "y", "Y":
+			startJob := false
+			addDest := false
+
+			key := msg.String()
+
+			if m.destConflict {
+				// Conflict Mode: Y/Enter = Confirm Merge, N/Esc = Back
+				if key == "y" || key == "Y" || key == "enter" {
+					startJob = true
+				} else if key == "n" || key == "N" || key == "esc" {
+					addDest = true // Go back to selecting dest
+				}
+			} else {
+				// Normal Mode: Y = Add Another, N/Enter = Done/Start
+				if key == "y" || key == "Y" {
+					addDest = true
+				} else if key == "n" || key == "N" || key == "enter" {
+					startJob = true
+				}
+			}
+
+			if addDest {
 				m.state = stateSelectingDest
 				m.currentPath = "" // Reset browsing
 				return m, loadRootsCmd
-			case "n", "N", "enter":
+			}
+
+			if startJob {
 				// Update config with selections
 				m.config.Source = m.srcPath
 				m.config.Destination = m.dstPaths[0]
+
+				// Auto-enable Resume/SkipExisting if conflict detected
+				if m.destConflict {
+					m.config.SkipExisting = true
+				}
 
 				if m.config.DryRun {
 					m.state = stateDryRun
@@ -747,7 +784,13 @@ func (m Model) View() string {
 		for i, d := range m.dstPaths {
 			s += fmt.Sprintf("  %d. %s\n", i+1, d)
 		}
-		s += "\nAdd another destination? (y/N)"
+
+		if m.destConflict {
+			s += lipgloss.NewStyle().Foreground(lipgloss.Color("202")).Bold(true).Render("\n⚠️  DESTINATION EXISTS: Merge/Resume mode enabled.")
+			s += "\n\nConfirm Merge? (Y/n)"
+		} else {
+			s += "\n\nAdd another destination? (y/N)"
+		}
 		return s
 	}
 
