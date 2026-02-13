@@ -30,6 +30,12 @@
 ## 📦 Installation
 See [INSTALL.md](INSTALL.md) for detailed instructions on binaries, Go install, and building from source.
 
+### Homebrew (macOS)
+```bash
+brew tap Mald0r0r000/loot
+brew install loot
+```
+
 ## ❓ Troubleshooting
 Encountering issues? Check [TROUBLESHOOTING.md](TROUBLESHOOTING.md) for solutions to common problems.
 
