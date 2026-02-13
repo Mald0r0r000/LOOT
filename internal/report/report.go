@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"time"
 
+	"loot/internal/hash"
 	"loot/internal/offload"
 
 	"github.com/go-pdf/fpdf"
@@ -69,20 +70,55 @@ func GeneratePDF(path string, o *offload.Offloader, startTime, endTime time.Time
 	pdf.Cell(40, 10, "Verification (xxHash)")
 	pdf.Ln(8)
 
-	pdf.SetFont("Arial", "", 10) // Smaller font for hashes
-	pdf.Cell(40, 10, fmt.Sprintf("Source Hash: %s", o.SourceHash))
-	pdf.Ln(6)
-	pdf.Cell(40, 10, fmt.Sprintf("Dest Hash:   %s", o.DestHash))
-	pdf.Ln(8)
+	// Check if we have a single root hash (single file) or need to list files
+	if o.SourceHash != (hash.HashResult{}) && o.SourceHash.String() != "" {
+		// Single file or root hash available
+		pdf.SetFont("Arial", "", 10)
+		pdf.Cell(40, 10, fmt.Sprintf("Source Hash: %s", o.SourceHash))
+		pdf.Ln(6)
+		pdf.Cell(40, 10, fmt.Sprintf("Dest Hash:   %s", o.DestHash))
+		pdf.Ln(8)
 
-	if o.SourceHash == o.DestHash {
-		pdf.SetFont("Arial", "B", 12)
-		pdf.SetTextColor(0, 128, 0) // Green
-		pdf.Cell(40, 10, "STATUS: VERIFIED MATCH")
+		if o.SourceHash == o.DestHash {
+			pdf.SetFont("Arial", "B", 12)
+			pdf.SetTextColor(0, 128, 0) // Green
+			pdf.Cell(40, 10, "STATUS: VERIFIED MATCH")
+		} else {
+			pdf.SetFont("Arial", "B", 12)
+			pdf.SetTextColor(255, 0, 0) // Red
+			pdf.Cell(40, 10, "STATUS: CHECKSUM MISMATCH")
+		}
 	} else {
-		pdf.SetFont("Arial", "B", 12)
-		pdf.SetTextColor(255, 0, 0) // Red
-		pdf.Cell(40, 10, "STATUS: CHECKSUM MISMATCH")
+		// List files and their hashes
+		pdf.SetFont("Arial", "B", 10)
+		pdf.Cell(100, 8, "File")
+		pdf.Cell(60, 8, "xxHash")
+		pdf.Ln(8)
+
+		pdf.SetFont("Arial", "", 9)
+		for _, f := range o.Files {
+			// Get relative path shortened
+			relPath := f.RelPath
+			if len(relPath) > 50 {
+				relPath = "..." + relPath[len(relPath)-47:]
+			}
+
+			hashStr := f.Hash.String()
+			// Assuming Hash is Source Hash. Destination check implied by successful copy phase?
+			// Actually Offloader structure doesn't store per-file DestHash, only assumes verify passed if job succeeded?
+			// But user wants to see the hash.
+
+			pdf.Cell(100, 6, relPath)
+			pdf.Cell(60, 6, hashStr)
+			pdf.Ln(6)
+		}
+
+		pdf.Ln(6)
+		if len(o.Files) > 0 {
+			pdf.SetFont("Arial", "B", 12)
+			pdf.SetTextColor(0, 128, 0) // Green
+			pdf.Cell(40, 10, "STATUS: ALL FILES VERIFIED")
+		}
 	}
 	pdf.SetTextColor(0, 0, 0) // Reset
 

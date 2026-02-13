@@ -48,7 +48,8 @@ func GenerateMHL(path string, files []offload.FileRes) error {
 			File:         f.RelPath,
 			Size:         f.Size,
 			LastModified: f.ModTime.Format(time.RFC3339),
-			XXHash64:     f.Hash,
+			XXHash64:     f.Hash.XXHash64,
+			MD5:          f.Hash.MD5,
 		}
 	}
 

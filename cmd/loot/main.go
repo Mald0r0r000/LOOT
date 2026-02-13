@@ -4,20 +4,35 @@ import (
 	"fmt"
 	"os"
 
+	"loot/internal/config"
 	"loot/internal/ui"
 
 	tea "github.com/charmbracelet/bubbletea"
 )
 
+// Version will be set via ldflags during build
+// Example: go build -ldflags "-X main.version=1.0.0"
+var version = "dev"
+
 func main() {
-	// For now, we launch directly into the Dashboard.
-	// CLI args support can be re-added later by passing them to NewRootModel
-	// or implementing a specific "Headless" mode.
+	cfg, err := config.ParseFlags(version)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
 
-	// Check if terminal is interactive?
-	// For this version: Always Dashboard.
+	// Interactive mode
+	if cfg.Interactive {
+		p := tea.NewProgram(ui.NewRootModel(cfg))
+		if _, err := p.Run(); err != nil {
+			fmt.Printf("Error running loot: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
 
-	p := tea.NewProgram(ui.NewRootModel())
+	// CLI mode
+	p := tea.NewProgram(ui.InitialModelWithConfig(cfg))
 	if _, err := p.Run(); err != nil {
 		fmt.Printf("Error running loot: %v\n", err)
 		os.Exit(1)

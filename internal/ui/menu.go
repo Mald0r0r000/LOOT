@@ -57,7 +57,8 @@ func InitialMenuModel() MenuModel {
 	items := []list.Item{
 		item("OFFLOAD"),
 		item("Volume Info"),
-		item("Readme"),
+		item("ReadMe/Cmd"),
+		item("Settings"),
 		item("Credits"),
 		item("Exit"),
 	}

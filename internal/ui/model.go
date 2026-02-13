@@ -5,16 +5,17 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-	"time"
 
 	"github.com/charmbracelet/bubbles/list"
 	"github.com/charmbracelet/bubbles/progress"
+	"github.com/charmbracelet/bubbles/spinner"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
-	"loot/internal/mhl"
+	"loot/internal/config"
+	"loot/internal/job"
 	"loot/internal/offload"
-	"loot/internal/report"
+	"loot/internal/output"
 )
 
 const logoASCII = `
@@ -70,9 +71,9 @@ const (
 	stateCopying
 	stateVerifying
 	stateDone
+	stateJobManager
+	stateErrorDetails
 )
-
-// ... Styles ... (kept same)
 
 // fileItem implements list.Item
 type fileItem struct {
@@ -80,39 +81,74 @@ type fileItem struct {
 	isDir             bool
 }
 
+type jobItem struct {
+	j *job.Job
+}
+
+func (i jobItem) Title() string {
+	statusIcon := "⏳"
+	switch i.j.Status {
+	case job.StatusRunning, job.StatusCopying, job.StatusVerifying:
+		statusIcon = "🚀"
+	case job.StatusCompleted:
+		statusIcon = "✅"
+	case job.StatusFailed:
+		statusIcon = "❌"
+	case job.StatusCancelled:
+		statusIcon = "🚫"
+	}
+	return fmt.Sprintf("%s %s", statusIcon, filepath.Base(i.j.Offloader.Source))
+}
+
+func (i jobItem) Description() string {
+	dest := "Multiple"
+	if len(i.j.Offloader.Destinations) == 1 {
+		dest = filepath.Base(i.j.Offloader.Destinations[0])
+	}
+	return fmt.Sprintf("ID: %s | To: %s | Status: %s", i.j.ID, dest, i.j.Status)
+}
+func (i jobItem) FilterValue() string { return i.j.ID }
+
 func (i fileItem) Title() string       { return i.title }
 func (i fileItem) Description() string { return i.desc }
 func (i fileItem) FilterValue() string { return i.title }
 
 type Model struct {
-	state   state
-	srcList list.Model
-	dstList list.Model
+	state         state
+	previousState state // To return from Job Manager
+	srcList       list.Model
+	dstList       list.Model
 
 	currentPath string // Current browsing path
 	srcPath     string
 	dstPaths    []string // Multiple destinations
 
-	progress  progress.Model
-	offloader *offload.Offloader
+	progress progress.Model
 
-	done      bool
-	verifying bool
-	status    string
-	err       error
+	// Job Management
+	queue      *job.Queue
+	msgChan    chan job.Msg // Persistent channel for job updates
+	queueState job.QueueState
+	jobList    list.Model // List component for Job Manager
 
-	totalBytes  int64
-	copiedBytes int64
-	speed       float64
+	CurrentJob *job.Job // Keep track of active job for display details
 
-	startTime time.Time
-	endTime   time.Time
+	// Display state
+	status  string
+	err     error
+	spinner spinner.Model
 
 	width  int
 	height int
+
+	config *config.Config
 }
 
 func InitialModel(src, dst string) Model {
+	return InitialModelWithConfig(config.DefaultConfig())
+}
+
+func InitialModelWithConfig(cfg *config.Config) Model {
 	// Default size, will be updated by WindowSizeMsg, but prevents empty render
 	defaultWidth := 80
 	defaultHeight := 14
@@ -127,8 +163,13 @@ func InitialModel(src, dst string) Model {
 	dstList.Title = "Select Destination"
 	dstList.SetShowHelp(false)
 
+	// Job List
+	jobList := list.New([]list.Item{}, list.NewDefaultDelegate(), defaultWidth, defaultHeight)
+	jobList.Title = "Job Queue (Tab: Toggle View, X: Cancel, R: Retry/Resume)"
+	jobList.SetShowHelp(false)
+
 	initialState := stateSelectingSource
-	if src != "" && dst != "" {
+	if cfg.Source != "" && cfg.Destination != "" {
 		initialState = stateCopying
 	}
 
@@ -138,27 +179,97 @@ func InitialModel(src, dst string) Model {
 		progress.WithoutPercentage(),
 	)
 
+	s := spinner.New()
+	s.Spinner = spinner.Dot
+	s.Style = lipgloss.NewStyle().Foreground(lipgloss.Color("205"))
+
+	// Initialize dstPaths from config if present
+	dstPaths := []string{}
+	if cfg.Destination != "" {
+		dstPaths = append(dstPaths, cfg.Destination)
+	}
+
+	// Initialize Queue
+	q := job.NewQueue()
+	msgChan := make(chan job.Msg, 100)
+
+	var currentJob *job.Job
+
+	if initialState == stateCopying {
+		currentJob = job.NewJob(cfg)
+		// Force update destinations in offloader (hack until config refactor)
+		currentJob.Offloader.Destinations = dstPaths
+		q.Add(currentJob)
+	}
+
 	return Model{
-		state:     initialState,
-		srcList:   srcList,
-		dstList:   dstList,
-		srcPath:   src,
-		dstPaths:  []string{}, // Empty initially
-		progress:  p,
-		offloader: offload.NewOffloader(src, dst),
-		status:    "Initializing...",
-		width:     defaultWidth,
-		height:    defaultHeight,
+		state:      initialState,
+		srcList:    srcList,
+		dstList:    dstList,
+		jobList:    jobList,
+		srcPath:    cfg.Source,
+		dstPaths:   dstPaths,
+		progress:   p,
+		spinner:    s,
+		queue:      q,
+		msgChan:    msgChan,
+		CurrentJob: currentJob, // Initial active job (if likely to start immediately/soon)
+		status:     "Initializing...",
+		width:      defaultWidth,
+		height:     defaultHeight,
+		config:     cfg,
 	}
 }
 
-func (m Model) Init() tea.Cmd {
-	if m.state == stateCopying {
-		m.startTime = time.Now()
-		return startCopyWrapper(m.offloader)
+func (m *Model) Reset(cfg *config.Config) {
+	m.state = stateSelectingSource
+	if cfg.Source != "" && cfg.Destination != "" {
+		m.state = stateCopying
 	}
-	// Init by loading volumes for browsing
-	return loadRootsCmd
+	m.srcPath = cfg.Source
+	m.dstPaths = []string{}
+	if cfg.Destination != "" {
+		m.dstPaths = append(m.dstPaths, cfg.Destination)
+	}
+	m.currentPath = ""
+	m.status = "Ready"
+	m.err = nil
+	m.config = cfg
+
+	// Reset lists titles/content?
+	// Maybe keep browsing history?
+	// Better to reset browsing to roots?
+	// We will trigger loadRootsCmd from Init or manually if needed?
+	// Let's rely on the Update loop catching the state change or passing a Cmd.
+}
+
+func (m Model) Init() tea.Cmd {
+	// Start Queue Processing
+	m.queue.Start(m.msgChan)
+
+	cmds := []tea.Cmd{
+		waitForJobMsg(m.msgChan),
+		waitForQueueState(m.queue.UpdateChan),
+		m.spinner.Tick, // Start spinner
+	}
+
+	if m.state == stateCopying {
+		// Already added in InitialModel
+	} else {
+		cmds = append(cmds, loadRootsCmd)
+	}
+
+	return tea.Batch(cmds...)
+}
+
+func waitForQueueState(ch <-chan job.QueueState) tea.Cmd {
+	return func() tea.Msg {
+		state, ok := <-ch
+		if !ok {
+			return nil
+		}
+		return state
+	}
 }
 
 func loadRootsCmd() tea.Msg {
@@ -230,54 +341,23 @@ type directoryLoadedMsg struct {
 
 type errMsg struct{ err error }
 
-// ... Messages ...
-type progressMsg struct {
-	offload.ProgressInfo
-	SourceChannel <-chan offload.ProgressInfo
-}
-type progressFinishedMsg struct{}
-type copyFinishedMsg struct{ err error }
-type verifyFinishedMsg struct {
-	success bool
-	err     error
-}
-
-// Commands Wrapper (same as before)
-func startCopyWrapper(o *offload.Offloader) tea.Cmd {
-	progressChan := make(chan offload.ProgressInfo, 100)
-	resultChan := make(chan error, 1)
-
+// Wrapper to run job in goroutine and pipe messages to tea
+func startJobCmd(j *job.Job) tea.Cmd {
+	ch := make(chan job.Msg, 10)
 	go func() {
-		defer close(progressChan)
-		defer close(resultChan)
-		err := o.Copy(progressChan)
-		resultChan <- err
+		defer close(ch)
+		j.Run(ch)
 	}()
-
-	return tea.Batch(waitForProgress(progressChan), waitForResult(resultChan))
+	return waitForJobMsg(ch)
 }
 
-func waitForProgress(ch <-chan offload.ProgressInfo) tea.Cmd {
+func waitForJobMsg(ch <-chan job.Msg) tea.Cmd {
 	return func() tea.Msg {
-		info, ok := <-ch
+		msg, ok := <-ch
 		if !ok {
-			return progressFinishedMsg{}
+			return nil // Channel closed, job finished
 		}
-		return progressMsg{ProgressInfo: info, SourceChannel: ch}
-	}
-}
-
-func waitForResult(ch <-chan error) tea.Cmd {
-	return func() tea.Msg {
-		err := <-ch
-		return copyFinishedMsg{err: err}
-	}
-}
-
-func startVerifyCmd(o *offload.Offloader) tea.Cmd {
-	return func() tea.Msg {
-		success, err := o.Verify()
-		return verifyFinishedMsg{success: success, err: err}
+		return msg
 	}
 }
 
@@ -288,6 +368,81 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyMsg:
 		if msg.Type == tea.KeyCtrlC {
 			return m, tea.Quit
+		}
+
+		// Quick Cancel in Copy/Verify view
+		if (m.state == stateCopying || m.state == stateVerifying) && (msg.String() == "x" || msg.String() == "X") {
+			if m.CurrentJob != nil {
+				m.queue.CancelJob(m.CurrentJob.ID)
+				m.status = "Cancelling..."
+			}
+			return m, nil
+		}
+
+		// Toggle Job Manager
+		if msg.String() == "tab" {
+			if m.state == stateJobManager {
+				// Restore previous state
+				m.state = m.previousState
+				// If we returned to a completed state but queue is done, maybe verify?
+				// For now just restore.
+				if m.state == stateJobManager { // Fallback
+					m.state = stateSelectingSource
+				}
+			} else {
+				m.previousState = m.state
+				m.state = stateJobManager
+			}
+			return m, nil
+		}
+
+		// Job Manager Logic
+		if m.state == stateJobManager {
+			if msg.String() == "x" || msg.String() == "X" {
+				if i, ok := m.jobList.SelectedItem().(jobItem); ok {
+					m.queue.CancelJob(i.j.ID)
+					// State update will come via QueueState
+				}
+			}
+
+			if msg.String() == "r" || msg.String() == "R" {
+				if i, ok := m.jobList.SelectedItem().(jobItem); ok {
+					// Allow retrying finished/failed/cancelled jobs
+					if i.j.Status == job.StatusFailed || i.j.Status == job.StatusCancelled || i.j.Status == job.StatusCompleted {
+						// Clone config
+						newCfg := *i.j.Config
+						newCfg.SkipExisting = true // Enable resume mode
+
+						// Create new Job
+						newJob := job.NewJob(&newCfg)
+						// Restore destinations (important for multiple dests)
+						newJob.Offloader.Destinations = i.j.Offloader.Destinations
+
+						m.queue.Add(newJob)
+						m.status = fmt.Sprintf("Retrying job %s...", i.j.ID)
+						m.err = nil // Clear error state
+					}
+				}
+			}
+			if msg.String() == "enter" {
+				if i, ok := m.jobList.SelectedItem().(jobItem); ok {
+					if i.j.Status == job.StatusFailed && i.j.Err != nil {
+						m.CurrentJob = i.j
+						m.state = stateErrorDetails
+						return m, nil
+					}
+				}
+			}
+			var cmd tea.Cmd
+			m.jobList, cmd = m.jobList.Update(msg)
+			return m, cmd
+		}
+
+		if m.state == stateErrorDetails {
+			if msg.String() == "esc" || msg.String() == "q" || msg.String() == "enter" {
+				m.state = stateJobManager
+				return m, nil
+			}
 		}
 
 		// Common Navigation
@@ -368,10 +523,111 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, loadRootsCmd
 			case "n", "N", "enter":
 				m.state = stateCopying
-				m.offloader = offload.NewOffloader(m.srcPath, m.dstPaths...)
-				m.startTime = time.Now()
-				return m, startCopyWrapper(m.offloader)
+				// Create and add job
+				m.config.Source = m.srcPath
+				m.config.Destination = m.dstPaths[0]
+
+				j := job.NewJob(m.config)
+				j.Offloader.Destinations = m.dstPaths
+				m.queue.Add(j)
+
+				// Wait for queue to pick it up?
+				// Just continue.
+				return m, nil
 			}
+		}
+
+	case spinner.TickMsg:
+		var cmd tea.Cmd
+		m.spinner, cmd = m.spinner.Update(msg)
+		return m, cmd
+
+	case job.QueueState:
+		m.queueState = msg
+		m.CurrentJob = m.queue.Active
+		status := fmt.Sprintf("Queue: %d Pending, %d Active, %d Done", msg.Pending, 1, msg.Completed)
+		if m.CurrentJob == nil {
+			status = fmt.Sprintf("Queue: %d Pending, 0 Active, %d Done", msg.Pending, msg.Completed)
+			if msg.Total > 0 && msg.Pending == 0 {
+				status = "All jobs completed."
+				if m.state != stateJobManager {
+					m.state = stateDone
+				}
+			}
+		}
+		m.status = status
+
+		// Update Job List
+		active, pending, completed, failed := m.queue.Snapshot()
+		items := []list.Item{}
+		if active != nil {
+			items = append(items, jobItem{j: active})
+		}
+		for _, j := range pending {
+			items = append(items, jobItem{j: j})
+		}
+		for _, j := range completed {
+			items = append(items, jobItem{j: j})
+		}
+		for _, j := range failed {
+			items = append(items, jobItem{j: j})
+		}
+		m.jobList.SetItems(items)
+
+		return m, waitForQueueState(m.queue.UpdateChan)
+
+	case job.Msg:
+		jobMsg := msg
+		switch jobMsg.Stage {
+		case job.StatusCopying:
+			m.state = stateCopying
+			m.status = jobMsg.Status
+			percent := float64(jobMsg.Progress.CopiedBytes) / float64(jobMsg.Progress.TotalBytes)
+			if jobMsg.Progress.TotalBytes == 0 {
+				percent = 0
+			}
+			cmd = m.progress.SetPercent(percent)
+			return m, tea.Batch(cmd, waitForJobMsg(m.msgChan)) // Use m.msgChan
+
+		case job.StatusVerifying:
+			m.state = stateVerifying
+			m.status = jobMsg.Status
+			return m, waitForJobMsg(m.msgChan)
+
+		case job.StatusCompleted:
+			m.status = jobMsg.Status
+			// CLI handling logic should be here if we want to quit
+			if !m.config.Interactive {
+				if m.config.JSONOutput {
+					output.PrintJSON(*jobMsg.Job.Result)
+				} else {
+					output.PrintHuman(*jobMsg.Job.Result)
+				}
+				return m, tea.Quit
+			}
+			m.state = stateDone // Transition to Done state
+			return m, waitForJobMsg(m.msgChan)
+
+		case job.StatusCancelled:
+			m.status = "Cancelled"
+			m.state = stateDone // Transition to Done state (or just stick around)
+			return m, waitForJobMsg(m.msgChan)
+
+		case job.StatusFailed:
+			m.err = jobMsg.Err
+			m.status = fmt.Sprintf("Failed: %v", jobMsg.Err)
+			if !m.config.Interactive {
+				if jobMsg.Job.Result != nil {
+					if m.config.JSONOutput {
+						output.PrintJSON(*jobMsg.Job.Result)
+					} else {
+						output.PrintHuman(*jobMsg.Job.Result)
+					}
+				}
+				return m, tea.Quit
+			}
+			m.state = stateDone
+			return m, waitForJobMsg(m.msgChan)
 		}
 
 	case tea.WindowSizeMsg:
@@ -392,6 +648,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.dstList.Title = "Dest Browser: " + msg.path
 		}
 		return m, cmd
+
+	case errMsg:
+		m.err = msg.err
+		m.status = fmt.Sprintf("Error: %v", msg.err)
+		return m, nil
 	}
 
 	// Update active list
@@ -404,91 +665,32 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, cmd
 	}
 
-	// Copying state update logic (keep existing)
-	if m.state == stateCopying || m.state == stateVerifying || m.state == stateDone {
-		// ... existing copy logic ...
-		// We need to bring back the copy logic which got truncated in previous steps/edits if I'm not careful.
-		// Since I am replacing the whole block, I must duplicate the copy logic here.
-
-		switch msg := msg.(type) {
-		case progressMsg:
-			m.status = "Copying..."
-			m.totalBytes = msg.TotalBytes
-			m.copiedBytes = msg.CopiedBytes
-			m.speed = msg.Speed
-			percent := float64(m.copiedBytes) / float64(m.totalBytes)
-			if m.totalBytes == 0 {
-				percent = 0
-			}
-			cmd = m.progress.SetPercent(percent)
-			return m, tea.Batch(cmd, waitForProgress(msg.SourceChannel))
-
-		case progressFinishedMsg:
-			return m, nil
-
-		case copyFinishedMsg:
-			if msg.err != nil {
-				m.err = msg.err
-				m.status = fmt.Sprintf("Copy failed: %v", msg.err)
-				m.done = true
-				m.state = stateDone
-				return m, tea.Quit
-			}
-			m.status = "Verifying..."
-			m.verifying = true
-			m.state = stateVerifying
-			return m, startVerifyCmd(m.offloader)
-
-		case verifyFinishedMsg:
-			// ... verification logic ...
-			m.done = true
-			m.verifying = false
-			m.state = stateDone
-			m.endTime = time.Now()
-
-			if msg.err != nil {
-				m.status = fmt.Sprintf("Verification error: %v", msg.err)
-				m.err = msg.err
-			} else if msg.success {
-				m.status = "✅ Verification successful!"
-
-				// Reports
-				for _, dst := range m.dstPaths {
-					// PDF
-					reportPath := dst + ".pdf"
-					if err := report.GeneratePDF(reportPath, m.offloader, m.startTime, m.endTime); err != nil {
-						m.status += fmt.Sprintf("\n⚠️ Report generation failed for %s: %v", dst, err)
-					} else {
-						m.status += fmt.Sprintf("\n📄 Report saved to: %s", reportPath)
-					}
-
-					// MHL
-					mhlPath := dst + ".mhl"
-					if err := mhl.GenerateMHL(mhlPath, m.offloader.Files); err != nil {
-						m.status += fmt.Sprintf("\n⚠️ MHL generation failed for %s: %v", dst, err)
-					} else {
-						m.status += fmt.Sprintf("\n📄 MHL saved to: %s", mhlPath)
-					}
-				}
-			} else {
-				m.status = "❌ Checksum mismatch!"
-				m.err = fmt.Errorf("checksum mismatch")
-			}
-			return m, nil
-		}
-
-		if _, ok := msg.(progress.FrameMsg); ok {
-			progressModel, cmd := m.progress.Update(msg)
-			m.progress = progressModel.(progress.Model)
-			return m, cmd
-		}
-	}
-
 	return m, nil
 }
 
 func (m Model) View() string {
+	if !m.config.Interactive {
+		return ""
+	}
 	s := titleStyle.Render(logoASCII) + "\n"
+
+	if m.state == stateJobManager {
+		s += "JOB MANAGER:\n"
+		s += m.jobList.View()
+		s += "\n(Enter: View Error Details for Failed Jobs)"
+		return s
+	}
+
+	if m.state == stateErrorDetails {
+		s += titleStyle.Render("ERROR DETAILS") + "\n\n"
+		if m.CurrentJob != nil {
+			s += fmt.Sprintf("Job ID: %s\n", m.CurrentJob.ID)
+			s += fmt.Sprintf("Source: %s\n", m.CurrentJob.Offloader.Source)
+			s += fmt.Sprintf("Error:\n%v\n", m.CurrentJob.Err)
+		}
+		s += "\n\n(Press Esc/Enter to return)"
+		return s
+	}
 
 	if m.state == stateSelectingSource {
 		s += "BROWSE SOURCE:\n"
@@ -536,21 +738,21 @@ func (m Model) View() string {
 		return s + errorStyle.Render(fmt.Sprintf("Error: %v", m.err))
 	}
 
-	if m.done {
-		msg := m.status
+	if m.state == stateDone {
 		if m.status == "✅ Verification successful!" {
-			msg = completedStyle.Render(m.status)
+			return s + completedStyle.Render(m.status) + "\n\n" + instructionStyle.Render("(Press 'q' to return to menu)")
 		}
-		return s + msg + "\n\n" + instructionStyle.Render("(Press 'q' to return to menu)")
+		// Failure case or other done state
+		return s + m.status + "\n\n" + instructionStyle.Render("(Press 'q' to return to menu)")
 	}
 
 	s += progressStyle.Render(m.progress.View()) +
 		percentageStyle.Render(fmt.Sprintf("%.0f%%", m.progress.Percent()*100)) + "\n"
 
-	if m.verifying {
-		s += statsStyle.Render("Verifying Checksums...")
-	} else {
-		speedMB := m.speed / (1024 * 1024)
+	if m.state == stateVerifying {
+		s += m.spinner.View() + " " + statsStyle.Render("Verifying Checksums...")
+	} else if m.CurrentJob != nil {
+		speedMB := m.CurrentJob.Speed / (1024 * 1024)
 		s += statsStyle.Render(fmt.Sprintf("%.2f MB/s • %s", speedMB, m.status))
 	}
 

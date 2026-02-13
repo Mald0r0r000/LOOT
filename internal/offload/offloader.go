@@ -1,13 +1,16 @@
 package offload
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
-	"github.com/cespare/xxhash/v2"
+	"loot/internal/config"
+	"loot/internal/hash"
 )
 
 const BufferSize = 4 * 1024 * 1024 // 4MB
@@ -23,7 +26,7 @@ type FileRes struct {
 	RelPath string
 	Size    int64
 	ModTime time.Time
-	Hash    string
+	Hash    hash.HashResult
 }
 
 // Offloader handles the copy process
@@ -31,24 +34,31 @@ type Offloader struct {
 	Source       string
 	Destinations []string
 	BufferSize   int
-	SourceHash   string
-	DestHash     string // We might need a map for multi-dest, but for now let's keep it simple (concat or first?)
+	SourceHash   hash.HashResult
+	DestHash     hash.HashResult // We might need a map for multi-dest, but for now let's keep it simple (concat or first?)
 	// Actually, let's store per-destination hash? Or just verify all match source.
 	// For Report, we want to show all are verified.
 
-	Files []FileRes
+	Files  []FileRes
+	Config *config.Config
 }
 
 func NewOffloader(src string, dsts ...string) *Offloader {
+	return NewOffloaderWithConfig(config.DefaultConfig(), src, dsts...)
+}
+
+func NewOffloaderWithConfig(cfg *config.Config, src string, dsts ...string) *Offloader {
 	return &Offloader{
 		Source:       src,
 		Destinations: dsts,
-		BufferSize:   BufferSize,
+		BufferSize:   cfg.BufferSize,
+		Config:       cfg,
 	}
 }
 
 // tracker maintains state across multiple files
 type tracker struct {
+	mu           sync.Mutex
 	TotalBytes   int64
 	CopiedBytes  int64
 	StartTime    time.Time
@@ -57,6 +67,9 @@ type tracker struct {
 }
 
 func (t *tracker) update(n int, file string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
 	t.CopiedBytes += int64(n)
 	now := time.Now()
 	// Update every 50ms or when done
@@ -81,7 +94,12 @@ func (t *tracker) update(n int, file string) {
 	}
 }
 
-func (o *Offloader) Copy(progressChan chan<- ProgressInfo) error {
+type copyJob struct {
+	path    string
+	relPath string
+}
+
+func (o *Offloader) Copy(ctx context.Context, progressChan chan<- ProgressInfo) error {
 	info, err := os.Stat(o.Source)
 	if err != nil {
 		return fmt.Errorf("failed to stat source: %w", err)
@@ -99,6 +117,9 @@ func (o *Offloader) Copy(progressChan chan<- ProgressInfo) error {
 			if err != nil {
 				return err
 			}
+			if err := ctx.Err(); err != nil {
+				return err
+			}
 			if !info.IsDir() {
 				t.TotalBytes += info.Size()
 			}
@@ -108,68 +129,125 @@ func (o *Offloader) Copy(progressChan chan<- ProgressInfo) error {
 			return fmt.Errorf("failed to calculate total size: %w", err)
 		}
 
-		// Walk and copy
-		return filepath.Walk(o.Source, func(path string, info os.FileInfo, err error) error {
-			if err != nil {
-				return err
-			}
+		// Parallel Copy Logic
+		numWorkers := o.Config.Concurrency
+		if numWorkers < 1 {
+			numWorkers = 1
+		}
 
-			// Skip .DS_Store
-			if info.Name() == ".DS_Store" {
-				return nil
-			}
+		jobs := make(chan copyJob, numWorkers)
+		results := make(chan error, numWorkers)
+		var wg sync.WaitGroup
 
-			relPath, err := filepath.Rel(o.Source, path)
-			if err != nil {
-				return err
-			}
-
-			// If it's a directory, create it in all destinations
-			if info.IsDir() {
-				for _, dstRoot := range o.Destinations {
-					destPath := filepath.Join(dstRoot, relPath)
-					if err := os.MkdirAll(destPath, info.Mode()); err != nil {
-						return fmt.Errorf("failed to create dir %s: %w", destPath, err)
+		// Start Workers
+		for i := 0; i < numWorkers; i++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				for {
+					select {
+					case <-ctx.Done():
+						return
+					case j, ok := <-jobs:
+						if !ok {
+							return
+						}
+						var dstPaths []string
+						for _, dstRoot := range o.Destinations {
+							dstPaths = append(dstPaths, filepath.Join(dstRoot, j.relPath))
+						}
+						if err := o.copyFileMulti(ctx, j.path, dstPaths, t); err != nil {
+							select {
+							case results <- err:
+							default:
+							}
+						}
 					}
 				}
+			}()
+		}
+
+		// Feed jobs
+		go func() {
+			defer close(jobs)
+			walkErr := filepath.Walk(o.Source, func(path string, info os.FileInfo, err error) error {
+				if err != nil {
+					return err
+				}
+				if err := ctx.Err(); err != nil {
+					return err
+				}
+
+				if info.Name() == ".DS_Store" {
+					return nil
+				}
+
+				relPath, err := filepath.Rel(o.Source, path)
+				if err != nil {
+					return err
+				}
+
+				if info.IsDir() {
+					// Create directories synchronously to ensure they exist for files
+					for _, dstRoot := range o.Destinations {
+						destPath := filepath.Join(dstRoot, relPath)
+						if err := os.MkdirAll(destPath, info.Mode()); err != nil {
+							return fmt.Errorf("failed to create dir %s: %w", destPath, err)
+						}
+					}
+					return nil
+				}
+
+				// Send file job
+				select {
+				case jobs <- copyJob{path: path, relPath: relPath}:
+				case <-ctx.Done(): // Check context during send block
+					return ctx.Err()
+				}
 				return nil
-			}
+			})
 
-			// It's a file, copy to all destinations
-			// We need full paths for destinations
-			var dstPaths []string
-			for _, dstRoot := range o.Destinations {
-				dstPaths = append(dstPaths, filepath.Join(dstRoot, relPath))
+			if walkErr != nil {
+				results <- walkErr
 			}
+		}()
 
-			return o.copyFileMulti(path, dstPaths, t)
-		})
+		// Wait for workers
+		go func() {
+			wg.Wait()
+			close(results)
+		}()
+
+		// Collect errors (return first one)
+		var firstErr error
+		for err := range results {
+			if err != nil && firstErr == nil {
+				firstErr = err
+				// Do not return early. Wait for results channel to close (which happens after wg.Wait())
+				// This prevents the Job from closing the progress channel while workers are still running.
+			}
+		}
+
+		return firstErr
 
 	} else {
 		// Single file
 		t.TotalBytes = info.Size()
-
-		// For single file copy, we ensure parent dirs exist
-		// o.Destinations should be treated as Full Paths if source is file?
-		// Or folders?
-		// Convention: If Source is File, Dest IS the file path (renaming possible) OR dir?
-		// In previous implementation: o.Destination was full path.
-		// Let's assume o.Destinations are full paths if Source is file.
-
-		return o.copyFileMulti(o.Source, o.Destinations, t)
+		return o.copyFileMulti(ctx, o.Source, o.Destinations, t)
 	}
 }
 
 // copyFileMulti copies src to multiple destinations simultaneously
-func (o *Offloader) copyFileMulti(src string, dests []string, t *tracker) error {
-	// 1. Open Source
-	srcFile, err := os.Open(src)
+func (o *Offloader) copyFileMulti(ctx context.Context, src string, dests []string, t *tracker) error {
+	// ... (Skipping Stat and Prep logic which doesn't need context explicitly, but loop does)
+
+	// 1. Stat Source first for size comparison
+	srcInfo, err := os.Stat(src)
 	if err != nil {
 		return err
 	}
-	defer srcFile.Close()
 
-	// 2. Open Destinations
+	// 2. Prepare Destinations
 	var openFiles []*os.File
 	var writers []io.Writer
 
@@ -180,7 +258,18 @@ func (o *Offloader) copyFileMulti(src string, dests []string, t *tracker) error 
 		}
 	}()
 
+	skippedCount := 0
 	for _, dstPath := range dests {
+		// Check for SkipExisting
+		if o.Config.SkipExisting {
+			if dstInfo, err := os.Stat(dstPath); err == nil && !dstInfo.IsDir() {
+				if dstInfo.Size() == srcInfo.Size() {
+					skippedCount++
+					continue
+				}
+			}
+		}
+
 		// Ensure parent dir exists
 		if err := os.MkdirAll(filepath.Dir(dstPath), 0755); err != nil {
 			return err
@@ -194,42 +283,78 @@ func (o *Offloader) copyFileMulti(src string, dests []string, t *tracker) error 
 		writers = append(writers, f)
 	}
 
-	// 3. MultiWriter (Not used here if we loop manually, but good practice to know writers are ready)
-	// multiDest := io.MultiWriter(writers...)
+	// If all skipped
+	if len(writers) == 0 {
+		t.update(int(srcInfo.Size()), filepath.Base(src)+" (skipped)")
+		return nil
+	}
+
+	// Check context before opening src
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	// 3. Open Source
+	srcFile, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer srcFile.Close()
 
 	// 4. Custom Loop for Copy + Progress + Hash
-	hasher := xxhash.New()
+	var hashWriter io.Writer
+	if o.Config.DualHash {
+		hashWriter = hash.NewMultiHasher(config.AlgoXXHash64, config.AlgoMD5)
+	} else {
+		hashWriter = hash.NewHasher(o.Config.Algorithm)
+	}
 
-	// We use our custom loop to handle progress updates and hashing simultaneously
-	return o.copyFileMultiLoop(srcFile, writers, hasher, t, src)
+	return o.copyFileMultiLoop(ctx, srcFile, writers, hashWriter, t, src)
 }
 
-func (o *Offloader) copyFileMultiLoop(srcFile *os.File, writers []io.Writer, hasher io.Writer, t *tracker, fileName string) error {
-	// MultiWriter including hasher?
-	// No, Hasher is on Read side (Tee) OR Write side (MultiWriter).
-	// If we add hasher to MultiWriter, we hash what we WRITE.
-	// That's actually better: verifies what we intended to write.
+// BufferPool to reduce GC pressure
+var bufferPool = sync.Pool{
+	New: func() interface{} {
+		b := make([]byte, 1024*1024) // 1MB buffer
+		return &b
+	},
+}
 
+func (o *Offloader) copyFileMultiLoop(ctx context.Context, srcFile *os.File, writers []io.Writer, hasher io.Writer, t *tracker, fileName string) error {
 	allWriters := append(writers, hasher)
 	multiDest := io.MultiWriter(allWriters...)
 
-	buf := make([]byte, o.BufferSize)
-	for {
-		n, err := srcFile.Read(buf)
-		if n > 0 {
-			if _, wErr := multiDest.Write(buf[:n]); wErr != nil {
-				return wErr
-			}
-			t.update(n, filepath.Base(fileName))
-		}
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			return err
-		}
+	bufPtr := bufferPool.Get().(*[]byte)
+	defer bufferPool.Put(bufPtr)
+	buf := *bufPtr
+
+	pw := &progressWriter{
+		w:        multiDest,
+		tracker:  t,
+		fileName: filepath.Base(fileName),
+		ctx:      ctx,
 	}
-	return nil
+
+	_, err := io.CopyBuffer(pw, srcFile, buf)
+	return err
+}
+
+type progressWriter struct {
+	w        io.Writer
+	tracker  *tracker
+	fileName string
+	ctx      context.Context
+}
+
+func (pw *progressWriter) Write(p []byte) (n int, err error) {
+	if err := pw.ctx.Err(); err != nil {
+		return 0, err
+	}
+	n, err = pw.w.Write(p)
+	if n > 0 {
+		pw.tracker.update(n, pw.fileName)
+	}
+	return
 }
 
 func (o *Offloader) Verify() (bool, error) {
@@ -258,10 +383,14 @@ func (o *Offloader) Verify() (bool, error) {
 }
 
 func (o *Offloader) verifyDir() (bool, error) {
-	var srcCombinedHash uint64
-	// Map to store file hashes to compare against dests?
-	// Or just XOR sum? XOR sum is fragile if multiple files differ.
-	// Let's iterate source, calc hash, then check all dests immediately.
+	// For Directory verification, we don't have a single "SourceHash" that is easy to check against.
+	// unless we implement a merkle tree or similar.
+	// For now, let's verify file by file.
+
+	// We will set SourceHash/DestHash to a dummy value or the last specific error?
+	// Or maybe "VERIFIED" string?
+	// Since HashResult is structured, we can't just put "VERIFIED".
+	// We'll leave them empty for Dir-level, or use a specific indicator in a future field.
 
 	err := filepath.Walk(o.Source, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
@@ -274,24 +403,31 @@ func (o *Offloader) verifyDir() (bool, error) {
 		}
 
 		if !info.IsDir() {
-			srcH, err := calculateXXHash(path)
+			srcH, err := calculateFileHash(path, o.Config)
 			if err != nil {
 				return err
 			}
-			srcCombinedHash ^= srcH
 
 			relPath, _ := filepath.Rel(o.Source, path)
 
 			// Verify all destinations
 			for _, dstRoot := range o.Destinations {
 				dstPath := filepath.Join(dstRoot, relPath)
-				dstH, err := calculateXXHash(dstPath)
+				dstH, err := calculateFileHash(dstPath, o.Config)
 				if err != nil {
 					return fmt.Errorf("failed to hash dest %s: %w", dstPath, err)
 				}
 
-				if srcH != dstH {
+				// Compare Primary
+				algo := o.Config.Algorithm
+				if srcH.GetPrimary(algo) != dstH.GetPrimary(algo) {
 					return fmt.Errorf("mismatch: %s vs %s", relPath, dstPath)
+				}
+				// Check dual hash if enabled
+				if o.Config.DualHash {
+					if srcH.MD5 != dstH.MD5 {
+						return fmt.Errorf("MD5 mismatch: %s vs %s", relPath, dstPath)
+					}
 				}
 			}
 
@@ -300,32 +436,39 @@ func (o *Offloader) verifyDir() (bool, error) {
 				RelPath: relPath,
 				Size:    info.Size(),
 				ModTime: info.ModTime(),
-				Hash:    fmt.Sprintf("%x", srcH),
+				Hash:    srcH,
 			})
 		}
 		return nil
 	})
 
-	o.SourceHash = fmt.Sprintf("DIR-%x", srcCombinedHash)
-	o.DestHash = o.SourceHash // Verified!
+	// How to represent "DIR VERIFIED" in a hash struct?
+	// Maybe we just don't set SourceHash/DestHash for root dir
+	// OR we set it to XXHash of the list of hashes? Too complex for now.
 	return err == nil, err
 }
 
 func (o *Offloader) verifyFile() (bool, error) {
-	srcH, err := calculateXXHash(o.Source)
+	srcH, err := calculateFileHash(o.Source, o.Config)
 	if err != nil {
 		return false, err
 	}
-	o.SourceHash = fmt.Sprintf("%x", srcH)
+	o.SourceHash = srcH
 
 	for _, dstPath := range o.Destinations {
-		dstH, err := calculateXXHash(dstPath)
+		dstH, err := calculateFileHash(dstPath, o.Config)
 		if err != nil {
 			return false, err
 		}
 
-		if srcH != dstH {
+		algo := o.Config.Algorithm
+		if srcH.GetPrimary(algo) != dstH.GetPrimary(algo) {
 			return false, fmt.Errorf("mismatch: %s", dstPath)
+		}
+		if o.Config.DualHash {
+			if srcH.MD5 != dstH.MD5 {
+				return false, fmt.Errorf("MD5 mismatch: %s", dstPath)
+			}
 		}
 	}
 
@@ -343,17 +486,9 @@ func (o *Offloader) verifyFile() (bool, error) {
 	return true, nil
 }
 
-func calculateXXHash(path string) (uint64, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return 0, err
+func calculateFileHash(path string, cfg *config.Config) (hash.HashResult, error) {
+	if cfg.DualHash {
+		return hash.CalculateFileHash(path, config.AlgoXXHash64, config.AlgoMD5)
 	}
-	defer f.Close()
-
-	hasher := xxhash.New()
-	buf := make([]byte, BufferSize)
-	if _, err := io.CopyBuffer(hasher, f, buf); err != nil {
-		return 0, err
-	}
-	return hasher.Sum64(), nil
+	return hash.CalculateFileHash(path, cfg.Algorithm)
 }

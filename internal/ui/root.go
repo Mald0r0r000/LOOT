@@ -3,8 +3,11 @@ package ui
 import (
 	"fmt"
 
+	"github.com/charmbracelet/bubbles/spinner"
 	tea "github.com/charmbracelet/bubbletea"
 
+	"loot/internal/config"
+	"loot/internal/job"
 	"loot/internal/offload"
 )
 
@@ -15,13 +18,17 @@ const (
 	viewCopy
 	viewVolumeInfo
 	viewReadme
+	viewSettings
 	viewCredits
 )
 
 type RootModel struct {
-	view currentView
-	menu MenuModel
-	copy Model // Allows re-using existing logic
+	view     currentView
+	menu     MenuModel
+	copy     Model // Allows re-using existing logic
+	settings SettingsModel
+
+	config *config.Config
 	// We might need to reset copy model when entering viewCopy
 
 	width    int
@@ -29,12 +36,13 @@ type RootModel struct {
 	quitting bool
 }
 
-func NewRootModel() RootModel {
+func NewRootModel(cfg *config.Config) RootModel {
 	return RootModel{
-		view: viewMenu,
-		menu: InitialMenuModel(),
-		// Delay Copy Model init until selected? Or init empty
-		copy: InitialModel("", ""),
+		view:     viewMenu,
+		menu:     InitialMenuModel(),
+		copy:     InitialModelWithConfig(cfg),
+		settings: InitialSettingsModel(cfg),
+		config:   cfg,
 	}
 }
 
@@ -54,12 +62,10 @@ func (m RootModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		// Global Back handling for sub-views
 		if m.view != viewMenu && (msg.String() == "esc" || msg.String() == "q") {
-			// If copying is in progress, maybe confirm?
-			// For now, let's allow backing out which might kill the flow if not handled.
-			// Current CopyModel handles KeyCtrlC but not ESC/q specifically for back.
-			// Let's implement robust back.
 			m.view = viewMenu
-			m.copy = InitialModel("", "") // Reset copy state
+			// Reset copy state, keep config.
+			// IMPORTANT: Use Reset() instead of recreating model to preserve the running Queue!
+			m.copy.Reset(m.config)
 			return m, nil
 		}
 
@@ -75,6 +81,14 @@ func (m RootModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
+	// Always pass background updates to copy model for state persistence
+	switch msg.(type) {
+	case job.QueueState, job.Msg, spinner.TickMsg:
+		newCopyModel, copyCmd := m.copy.Update(msg)
+		m.copy = newCopyModel.(Model)
+		return m, copyCmd
+	}
+
 	switch m.view {
 	case viewMenu:
 		newMenu, menuCmd := m.menu.Update(msg)
@@ -88,12 +102,26 @@ func (m RootModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			switch choice {
 			case "OFFLOAD":
 				m.view = viewCopy
-				m.copy = InitialModel("", "") // Fresh start
-				return m, m.copy.Init()
+				// Create a clean copy of config to avoid state persistence
+				// Create a clean copy of config to avoid state persistence
+				cleanCfg := *m.config
+				cleanCfg.Source = ""
+				cleanCfg.Destination = ""
+
+				// Reset existing model state instead of recreating
+				m.copy.Reset(&cleanCfg)
+
+				// Return Init command to reload roots if needed
+				// Reset() doesn't return Cmd, so we need to construct it manually or call Init()
+				// But copy.Init() starts the Queue again! We don't want that if it's already running.
+				// We just want to load roots.
+				return m, loadRootsCmd
 			case "Volume Info":
 				m.view = viewVolumeInfo
-			case "Readme":
+			case "ReadMe/Cmd":
 				m.view = viewReadme
+			case "Settings":
+				m.view = viewSettings
 			case "Credits":
 				m.view = viewCredits
 			case "Exit":
@@ -107,8 +135,11 @@ func (m RootModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.copy = newCopyModel.(Model)
 		cmd = copyCmd
 		// Check if copy finished?
-		// The copy model has a 'done' state but stays there.
-		// User can press ESC to go back.
+
+	case viewSettings:
+		newSettings, settingsCmd := m.settings.Update(msg)
+		m.settings = newSettings
+		cmd = settingsCmd
 
 	case viewVolumeInfo:
 		// Static view, handle keys?
@@ -126,7 +157,14 @@ func (m RootModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (m RootModel) View() string {
 	if m.quitting {
-		return "Bye!\n"
+		return ""
+	}
+
+	// For CLI mode (non-interactive), we don't want to render anything from RootModel either
+	if m.config != nil && !m.config.Interactive {
+		return ""
+		// Actually, RootModel delegates to m.copy.View which we just silenced.
+		// But RootModel itself prints header.
 	}
 
 	header := titleStyle.Render(logoASCII) + "\n"
@@ -136,6 +174,8 @@ func (m RootModel) View() string {
 		return header + m.menu.View()
 	case viewCopy:
 		return m.copy.View()
+	case viewSettings:
+		return header + m.settings.View()
 	case viewVolumeInfo:
 		return header + "\n" + renderVolumeInfo()
 	case viewReadme:
@@ -159,13 +199,33 @@ func renderCredits() string {
 
 func renderReadme() string {
 	return `
-    SHORTCUTS
+    KEYBOARD SHORTCUTS
     
-    [Up/Down]   Navigate Menu
-    [Enter]     Select Option
-    [Space]     Toggle Selection (if applicable)
-    [Esc/q]     Back / Cancel
-    [Ctrl+C]    Quit
+    [Up/Down]   Navigate Menu / Lists
+    [Left/Right] Navigate Directory
+    [Enter]     Select Option / Enter Directory
+    [Space]     Select Source/Dest
+    [Esc/q]     Back / Cancel / Return to Menu
+    [Tab]       Toggle Job Manager (in Offload view)
+    [x/X]       Cancel Active Job
+    [r/R]       Retry Failed/Cancelled Job
+    [Ctrl+C]    Quit Application
+
+    CLI COMMANDS
+    
+    loot                 Interactive Mode (Default)
+    loot --version       Show Version
+    loot --source <src> --dest <dst> [flags]
+    
+    Flags:
+      --xxhash           Use xxHash (Default)
+      --md5              Use MD5
+      --sha1             Use SHA1
+      --sha256           Use SHA256
+      --no-verify        Skip verification
+      --resume           Resume interrupted transfer
+      --concurrency <N>  Set number of concurrent workers (Default: 4)
+      --json             Output JSON for automation
     `
 }
 
