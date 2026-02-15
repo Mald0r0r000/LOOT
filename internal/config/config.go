@@ -95,15 +95,21 @@ func ParseFlags(version string) (*Config, error) {
 	flag.StringVar(&cfg.Reel, "reel", "", "Reel identifier (e.g. '001', 'A002')")
 	flag.StringVar(&cfg.MetadataMode, "metadata-mode", "hybrid", "Metadata extraction mode: hybrid (default), header, exiftool, off")
 
+	flag.StringVar(&cfg.Source, "source", "", "Source directory")
+	flag.StringVar(&cfg.Source, "s", "", "Source directory (shorthand)")
+	flag.StringVar(&cfg.Destination, "dest", "", "Destination directory")
+	flag.StringVar(&cfg.Destination, "d", "", "Destination directory (shorthand)")
+	flag.StringVar(&cfg.Destination, "destination", "", "Destination directory")
+
 	versionFlag := flag.Bool("version", false, "Print version")
 	v := flag.Bool("v", false, "Print version (shorthand)")
 
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "LOOT - Professional Media Offload Tool\n\n")
 		fmt.Fprintf(os.Stderr, "Usage:\n")
-		fmt.Fprintf(os.Stderr, "  loot                          Interactive mode\n")
-		fmt.Fprintf(os.Stderr, "  loot <source> <dest>          CLI mode\n")
-		fmt.Fprintf(os.Stderr, "  loot --version                Print version\n\n")
+		fmt.Fprintf(os.Stderr, "  loot [flags]                  Interactive mode\n")
+		fmt.Fprintf(os.Stderr, "  loot [flags] <source> <dest>  CLI mode (positional)\n")
+		fmt.Fprintf(os.Stderr, "  loot --source <src> --dest <dst> [flags]  CLI mode (flags)\n\n")
 		fmt.Fprintf(os.Stderr, "Flags:\n")
 		flag.PrintDefaults()
 	}
@@ -131,19 +137,33 @@ func ParseFlags(version string) (*Config, error) {
 	// Get positional arguments
 	args := flag.Args()
 
-	if len(args) >= 2 {
+	// 1. Check Flags first
+	if cfg.Source != "" && cfg.Destination != "" {
 		cfg.Interactive = false
-		cfg.Source = args[0]
-		cfg.Destination = args[1]
+	} else if len(args) >= 2 {
+		// 2. Check Positional Args (override flags if provided? or fallback?)
+		// Let's use positional if flags are empty
+		if cfg.Source == "" {
+			cfg.Source = args[0]
+		}
+		if cfg.Destination == "" {
+			cfg.Destination = args[1]
+		}
+		cfg.Interactive = false
+	} else if cfg.Source != "" || cfg.Destination != "" {
+		// Partial flags?
+		return nil, fmt.Errorf("both --source and --dest are required for CLI mode")
+	} else {
+		// No flags, no positional -> Interactive
+		cfg.Interactive = true
+	}
 
+	if !cfg.Interactive {
 		// Verify source exists
 		if _, err := os.Stat(cfg.Source); os.IsNotExist(err) {
 			return nil, fmt.Errorf("source '%s' does not exist", cfg.Source)
 		}
-	} else if len(args) == 1 {
-		return nil, fmt.Errorf("both source and destination required for CLI mode")
 	}
-	// else: Interactive mode (len(args) == 0)
 
 	return cfg, nil
 }
