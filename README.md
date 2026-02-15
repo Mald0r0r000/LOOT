@@ -66,16 +66,28 @@ loot
 5. **Monitor**: Watch progress, speed, and ETA.
 
 ### CLI Mode & Flags
+### CLI Mode & Flags
 ```bash
+# Positional arguments (legacy)
+loot /source /destination
+
+# Named arguments (flexible order)
 loot --source /card --dest /backup --md5 --job-name "Day01" --dry-run
 ```
 
 **Common Flags:**
-- `--algorithm`: `xxhash64` (default), `md5`, `sha256`
+- `--source`, `-s`: Source directory path
+- `--dest`, `-d`: Destination directory path
+- `--md5`: Use MD5 hashing (shorthand)
+- `--sha256`: Use SHA256 hashing (shorthand)
+- `--xxhash64`: Use xxHash64 hashing (default)
+- `--algorithm`: Explicit algo selection (`xxhash64`, `md5`, `sha256`)
 - `--metadata-mode`: `hybrid` (default), `header`, `exiftool`, `off`
 - `--concurrency`: Number of workers (default 4)
-- `--dry-run`: Simulate only
-- `--resume`: Skip existing files
+- `--dry-run`: Simulate only (no copy)
+- `--resume` / `--skip-existing`: Resume interrupted transfer
+- `--json`: Output results as JSON
+- `--quiet`: Suppress stdout (errors only)
 
 ## 🛠️ Roadmap
 - [x] **Metadata Extraction**

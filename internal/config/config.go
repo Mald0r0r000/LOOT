@@ -104,6 +104,11 @@ func ParseFlags(version string) (*Config, error) {
 	versionFlag := flag.Bool("version", false, "Print version")
 	v := flag.Bool("v", false, "Print version (shorthand)")
 
+	// Algo booleans
+	md5Flag := flag.Bool("md5", false, "Use MD5 hash algorithm")
+	sha256Flag := flag.Bool("sha256", false, "Use SHA256 hash algorithm")
+	xxhashFlag := flag.Bool("xxhash64", false, "Use xxHash64 hash algorithm")
+
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "LOOT - Professional Media Offload Tool\n\n")
 		fmt.Fprintf(os.Stderr, "Usage:\n")
@@ -122,16 +127,25 @@ func ParseFlags(version string) (*Config, error) {
 		os.Exit(0)
 	}
 
-	// Parse algorithm
-	switch algorithmStr {
-	case "xxhash64":
-		cfg.Algorithm = AlgoXXHash64
-	case "md5":
+	// Parse algorithm priority: Bool Flags > String Flag > Default
+	if *md5Flag {
 		cfg.Algorithm = AlgoMD5
-	case "sha256":
+	} else if *sha256Flag {
 		cfg.Algorithm = AlgoSHA256
-	default:
-		return nil, fmt.Errorf("invalid algorithm: %s (must be xxhash64, md5, or sha256)", algorithmStr)
+	} else if *xxhashFlag {
+		cfg.Algorithm = AlgoXXHash64
+	} else {
+		// Fallback to string flag
+		switch algorithmStr {
+		case "xxhash64":
+			cfg.Algorithm = AlgoXXHash64
+		case "md5":
+			cfg.Algorithm = AlgoMD5
+		case "sha256":
+			cfg.Algorithm = AlgoSHA256
+		default:
+			return nil, fmt.Errorf("invalid algorithm: %s (must be xxhash64, md5, or sha256)", algorithmStr)
+		}
 	}
 
 	// Get positional arguments

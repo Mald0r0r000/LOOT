@@ -211,29 +211,35 @@ func renderReadme() string {
     
     [Up/Down]   Navigate Menu / Lists
     [Left/Right] Navigate Directory
-    [Enter]     Select Option / Enter Directory
+    [Enter]     Select Option / Confirm
     [Space]     Select Source/Dest
-    [Esc/q]     Back / Cancel / Return to Menu
-    [Tab]       Toggle Job Manager (in Offload view)
+    [Esc/q]     Back / Settings / Menu
+    [Tab]       Toggle Job Manager
     [x/X]       Cancel Active Job
-    [r/R]       Retry Failed/Cancelled Job
+    [r/R]       Retry Failed Job
     [Ctrl+C]    Quit Application
 
     CLI COMMANDS
     
-    loot                 Interactive Mode (Default)
+    loot                 Interactive Mode
     loot --version       Show Version
-    loot --source <src> --dest <dst> [flags]
+    loot /src /dst       Positional Mode
+    loot --source <src> --dest <dst>
+
+    FLAGS
     
-    Flags:
-      --xxhash           Use xxHash (Default)
       --md5              Use MD5
-      --sha1             Use SHA1
       --sha256           Use SHA256
+      --xxhash64         Use xxHash64 (Default)
+      
+      --dry-run          Simulate transfer
+      --resume           Skip existing files
       --no-verify        Skip verification
-      --resume           Resume interrupted transfer
-      --concurrency <N>  Set number of concurrent workers (Default: 4)
-      --json             Output JSON for automation
+      
+      --metadata-mode    hybrid|header|exiftool|off
+      --concurrency <N>  Set workers (Default: 4)
+      --json             Output JSON
+      --quiet            Errors only
     `
 }
 
