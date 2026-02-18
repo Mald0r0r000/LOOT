@@ -17,6 +17,21 @@ import (
 
 const BufferSize = 4 * 1024 * 1024 // 4MB
 
+// shouldSkip returns true for macOS system files/dirs that are volatile
+// and should never be copied or verified (they cause hash mismatches).
+func shouldSkip(name string) bool {
+	switch name {
+	case ".DS_Store",
+		".Spotlight-V100",
+		".fseventsd",
+		".Trashes",
+		".TemporaryItems",
+		".DocumentRevisions-V100":
+		return true
+	}
+	return false
+}
+
 type ProgressInfo struct {
 	TotalBytes  int64
 	CopiedBytes int64
@@ -126,6 +141,12 @@ func (o *Offloader) Copy(ctx context.Context, progressChan chan<- ProgressInfo) 
 			if err := ctx.Err(); err != nil {
 				return err
 			}
+			if shouldSkip(info.Name()) {
+				if info.IsDir() {
+					return filepath.SkipDir
+				}
+				return nil
+			}
 			if !info.IsDir() {
 				t.TotalBytes += info.Size()
 			}
@@ -193,7 +214,10 @@ func (o *Offloader) Copy(ctx context.Context, progressChan chan<- ProgressInfo) 
 					return err
 				}
 
-				if info.Name() == ".DS_Store" {
+				if shouldSkip(info.Name()) {
+					if info.IsDir() {
+						return filepath.SkipDir
+					}
 					return nil
 				}
 
@@ -412,8 +436,10 @@ func (o *Offloader) verifyDir() (bool, error) {
 			return err
 		}
 
-		// Skip .DS_Store
-		if info.Name() == ".DS_Store" {
+		if shouldSkip(info.Name()) {
+			if info.IsDir() {
+				return filepath.SkipDir
+			}
 			return nil
 		}
 
@@ -552,7 +578,10 @@ func (o *Offloader) DryRun() (*DryRunResult, error) {
 			if err != nil {
 				return err
 			}
-			if info.Name() == ".DS_Store" {
+			if shouldSkip(info.Name()) {
+				if info.IsDir() {
+					return filepath.SkipDir
+				}
 				return nil
 			}
 			if !info.IsDir() {
