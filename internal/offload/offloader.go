@@ -293,6 +293,8 @@ func (o *Offloader) copyFileMulti(ctx context.Context, src string, dests []strin
 	// Cleanup helper
 	defer func() {
 		for _, f := range openFiles {
+			// We only close here in case of early return/panic.
+			// Normal flow handles Sync and Close explicitly.
 			f.Close()
 		}
 	}()
@@ -348,7 +350,25 @@ func (o *Offloader) copyFileMulti(ctx context.Context, src string, dests []strin
 		hashWriter = hash.NewHasher(o.Config.Algorithm)
 	}
 
-	return o.copyFileMultiLoop(ctx, srcFile, writers, hashWriter, t, src)
+	err = o.copyFileMultiLoop(ctx, srcFile, writers, hashWriter, t, src)
+	if err != nil {
+		return err
+	}
+
+	// 5. Explicitly Sync and Close all destinations to catch physical I/O errors
+	for i, f := range openFiles {
+		// Sync flushes buffers to physical disk
+		if syncErr := f.Sync(); syncErr != nil {
+			return fmt.Errorf("failed to sync dest %s: %w", dests[i], syncErr)
+		}
+		if closeErr := f.Close(); closeErr != nil {
+			return fmt.Errorf("failed to close dest %s after copy: %w", dests[i], closeErr)
+		}
+	}
+	// Clear openFiles so the defer doesn't double-close (double-close is harmless but cleaner this way)
+	openFiles = nil
+
+	return nil
 }
 
 // BufferPool to reduce GC pressure
