@@ -6,7 +6,7 @@ class Loot < Formula
   # Stable Release via Git Tag
   url "https://github.com/Mald0r0r000/LOOT.git",
       tag:      "v1.0.9",
-      revision: "f4e5bdd33b20e6dbdfe87b304f636b5cea90e02c"
+      revision: "8b39007537245324f6c43537318cd6ec09d5f58a"
   
   head "https://github.com/Mald0r0r000/LOOT.git", branch: "main"
 
